@@ -29,8 +29,12 @@ if [ ! -f "$TARBALL" ]; then curl -fL --retry 3 https://ffmpeg.org/releases/ffmp
 printf '%s  %s\n' 733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1 "$TARBALL" | sha256sum -c -
 # FFmpeg checks that no absolute machine paths are embedded: compiler names
 # must be relative, resolved from PATH, not absolute --cc/--ar arguments.
+# Its AArch64 assembly addresses internal tables directly. Hide those C symbols
+# so the static decoder can link into Android's shared libmain.so without
+# requiring symbol interposition relocations.
 export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
 "$ROOT/scripts/build_ffmpeg_xma.sh" "$TARBALL" "$PREFIX/ffmpeg-xma" \
     --enable-cross-compile --target-os=android --arch=aarch64 \
+    --extra-cflags=-fvisibility=hidden \
     --cc=aarch64-linux-android33-clang --cxx=aarch64-linux-android33-clang++ \
     --ar=llvm-ar --ranlib=llvm-ranlib --strip=llvm-strip

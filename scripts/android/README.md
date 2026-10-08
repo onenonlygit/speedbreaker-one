@@ -5,10 +5,16 @@ XMA decoder and patched XenonRecomp are retained. No ReXGlue or game assets.
 
 ## Status: GO WITH RISKS
 
-A game-free Android platform probe builds. All 73 runtime translation units
-compile with NDK r28c using compile-only header fixtures. Android SDL3, glslang
-and patched FFmpeg XMA libraries build. Actual generated PPC code, full-runtime
-linking, device launch and gameplay are **not validated**.
+A game-free Android platform probe passed on the RP6 (4 KiB pages, Adreno 740,
+stock Vulkan 1.3.128). Memory aliases, fault recovery, atomics and all seven
+checked renderer extensions passed; BC compression was reported supported.
+Controller buttons registered; stick axes and actual audio playback remain
+unverified. The captured process ended through a force-stop, not a native crash.
+
+The supported user-supplied XEX now generates real PPC sources, and the complete
+Android ARM64 runtime links with NDK r28c. The full renderer, game startup,
+gameplay and performance are **not validated on-device**. The compile-only
+fixture path remains separate from the full build.
 
 The probe tests the real shared-memory backend: a 4 GiB guest reservation,
 512 MiB shared backing, bidirectional A/C/E aliases with exact +4 KiB E shift,
@@ -17,9 +23,9 @@ surface and present queue capability. It logs GPU/driver, renderer extensions,
 BC support, controllers and lifecycle. It does not create a game swapchain,
 exercise the complete write-watch algorithm, play XMA audio or run the game.
 
-Remaining risks: SELinux/shared-memory behavior, real concurrent write-watch,
-stock Adreno Vulkan extensions and BC texture formats, surface replacement on
-resume, RAM pressure, audio and performance. The upstream renderer maps Xenos
+Remaining risks: real concurrent write-watch, actual BC texture operations and
+shader/pipeline behavior, surface replacement on resume, RAM pressure, audio
+and performance. The upstream renderer maps Xenos
 compressed textures directly to BC formats; missing BC support needs a texture
 adaptation or compatible driver. No concrete fundamental blocker found yet.
 
@@ -65,7 +71,7 @@ cd android
 ./gradlew -PsbDiagnostics=OFF assembleDebug
 ```
 
-This full build path remains **unverified** until actual PPC sources are supplied.
+The full native build path has compiled and linked with actual PPC sources.
 The default full configuration fails loudly with no `ppc/`. Public CI builds only
 the probe and runtime compile-check. Never publish game-derived code/objects,
 `default.xex`, ISO or extracted assets. Keep upstream's generation model.
@@ -100,6 +106,9 @@ Its backup and credentials are separate from git. Never regenerate it per build.
 Export SB_KEYSTORE (absolute JKS path), SB_STORE_PASSWORD, SB_KEY_ALIAS and
 SB_KEY_PASSWORD; both debug/release use the key when configured. Diagnostic
 release builds are debuggable for report extraction; normal game releases are not.
+For an optimized full-runtime device test with adb run-as access, build with
+`./gradlew -PsbDiagnostics=OFF -PsbBringup=ON assembleRelease`. The bring-up flag
+only enables Android debugging access; it does not select diagnostic game code.
 
 CI secrets: SB_KEYSTORE_BASE64 (same JKS, base64), SB_STORE_PASSWORD,
 SB_KEY_ALIAS, SB_KEY_PASSWORD. Until these are provisioned CI produces an
@@ -123,6 +132,10 @@ This APK cannot test menus, races or FPS. Those tests start after generated code
 is integrated, the full runtime links and the USA game is installed.
 
 ## Foundational validation
+
+The first full Android link exposed FFmpeg AArch64 table relocations requiring
+internal C symbols to use hidden visibility. The Android dependency script now
+sets that visibility; the patched static XMA decoder links into libmain.so.
 
 CI builds and runs the actual upstream write-watch suite on the Linux host,
 including additional A/C/E alias-fault checks. Both watch-subpage configurations

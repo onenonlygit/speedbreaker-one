@@ -23,7 +23,7 @@ android {
         }
     }
     buildTypes {
-        release { debuggable (project.findProperty('sbDiagnostics') == 'ON'); if (System.getenv('SB_KEYSTORE')) signingConfig signingConfigs.personal; minifyEnabled false }
+        release { debuggable (project.findProperty('sbDiagnostics') == 'ON' || project.findProperty('sbBringup') == 'ON'); if (System.getenv('SB_KEYSTORE')) signingConfig signingConfigs.personal; minifyEnabled false }
         debug { if (System.getenv('SB_KEYSTORE')) signingConfig signingConfigs.personal; debuggable true }
     }
     sourceSets.main.java.srcDirs += '../../tools/SDL/android-project/app/src/main/java'
