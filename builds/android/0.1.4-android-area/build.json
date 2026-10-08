@@ -1,0 +1,15 @@
+{
+  "source": "0acaa1b21431cced22a0d197bc16ca859341df98 + renderer/app changes in containing commit",
+  "version": "0.1.4-android-area",
+  "version_code": 5,
+  "package": "com.onenonlygit.speedbreakerone",
+  "apk_sha256": "9256d7d9c8672d3a445d3dd15403346fb3fcc0f82e2e300767d7415a3a27cd09",
+  "apk_bytes": 20791151,
+  "build_ids": {
+    "libSDL3.so": "d9e57e7444676afebe94d7a2c66e1f7f569e8482",
+    "libc++_shared.so": "7befe631535aa853c4f4ac1293e49dcea34c9b6e",
+    "libmain.so": "00bc77563e3a7136dda394492993b3da383bbfca"
+  },
+  "certificate_sha256": "29ebbb37c610217ff00755e3731df6a1db46eda4cec45555157704ab545902bf",
+  "status": "Offline validated; RP6 performance and graphics unverified"
+}

@@ -129,3 +129,67 @@ counts, XMA stats and supported GPU timestamps are enabled for Android. The
 optimized signed ARM64 APK builds; no engine-audio recovery or performance gain
 has been established on RP6. See ANDROID_AUDIO.md. 0.1.2 remains the last known
 working device-tested APK; do not relabel it as 0.1.3 or overwrite its release.
+
+## 0.1.4: Android viewport-area trial (October 8, 2026)
+
+Baseline: `0acaa1b`, 0.1.3 audio-test. User reports most audio working and
+21–39 FPS racing at 720p, 60 FPS menu. This supersedes the earlier untested
+0.1.3 status; no new logs were reanalyzed for this change.
+
+One optimization: Android defaults the existing `NFSMW_UNTILED_AREA` path on.
+Untiled draws and dynamic-rendering areas use the clipped guest viewport rather
+than the entire oversized EDRAM target. Existing checks retain whole targets
+for disabled clipping, invalid viewport transforms, incompatible area unions,
+pass expansion and resolves reading beyond the cut region. Target allocations,
+resolve shaders, pass merge policy, barriers, submission slots, audio and ISO
+loading are unchanged. Environment override `NFSMW_UNTILED_AREA=0` restores the
+baseline policy. Desktop defaults remain unchanged.
+
+Evidence: racing has ~20–21 passes/resolves and completion waits, with little
+steady pipeline/upload activity. Code shows Android uses full EDRAM areas,
+e.g. 1280x1024 or larger for a 1280x720 view, and full-size cube-face areas.
+Reducing area can reduce overdraw and tile attachment traffic. Upstream reports
+benefits on Apple but a small regression on Linux Turnip; stock RP6 Adreno is
+unmeasured. This is a bounded trial, not a performance claim. Existing resolve
+fallbacks do not constitute proof of graphics equivalence across every scene.
+
+Synchronization review: completion-thread fence waits protect submission/upload
+slot reuse and guest memory access. Queue-idle calls found in presenter setup,
+resize/teardown are not evidence of a per-draw stall. Full inter-pass barriers
+remain conservative. Draw caching and pass merging already exist; changing these
+at the same time would obscure attribution. No new profiling query pools: retain
+0.1.3 submission GPU timestamps and enable existing `[untiled-area]` aggregates
+once per 120 frames (override `NFSMW_LOG_UNTILED_AREA=0` disables them). Reported
+MB loaded+stored is a model, not a hardware bandwidth counter.
+
+### RP6 comparison
+
+Install 0.1.4 over 0.1.3 without clearing data. Use internal 1x (1280x720), the
+same car/Quick Race/track, device performance mode, brightness and thermal state.
+Warm caches with one race; measure the next identical 2-minute race. Record FPS
+range/typical FPS, frame-time spikes and watts if available. Repeat the baseline
+under equivalent conditions using preserved 0.1.3 (downgrade may require adb
+`install -r -d` because version code is lower; keep data).
+
+Collect full logcat and app session logs, including `[perf]` GPU executing,
+CPU busy and completion/slot waits, and `[untiled-area]` Mpx/MB, pass restarts
+and resolves-read-past. Check roads, car, mirror, reflections, shadows and HUD,
+then verify engine audio/music and start a second race. FPS improvement alone
+without comparable warm/thermal conditions is insufficient. Regression: retain
+0.1.3 and revert only the Android viewport-area default.
+
+### Offline validation and artifacts
+
+Optimized debuggable ARM64 release build passed (existing NDK/Gradle setup).
+APK v2 signature verified against retained certificate
+`29ebbb37c610217ff00755e3731df6a1db46eda4cec45555157704ab545902bf`;
+package unchanged, version code 5. Native libmain Build ID differs from 0.1.3.
+Existing host disc-mount, SDL stereo-downmix and write-watch tests (subpages off
+and on) passed; git diff --check passed. These do not exercise Vulkan rendering
+on Adreno. No RP6 access or graphics/performance validation was performed.
+
+Checksums and native Build IDs are in builds/android/0.1.3-android-audio/
+(preserved baseline) and builds/android/0.1.4-android-area/ (new trial).
+Both APKs are preserved in the build workspace; 0.1.4 is delivered as a download.
+The authenticated source commit does not include APK binaries; shell Git push
+was unavailable because this workspace has no GitHub shell credentials.

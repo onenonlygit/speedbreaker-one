@@ -1836,11 +1836,26 @@ namespace gpu::renderer
         // and each shader pair keeping the whole target, once.
         // On by default with kLighterPasses (Apple: iPad Pro M2 GPU-bound at
         // 2x, same-run windows: executing -1.0 ms), else off; =0 turns it off.
+        // Android 0.1.4: trial the existing guarded viewport-area path on
+        // stock Adreno. Keep barrier policy independent (kLighterPasses).
+        // NFSMW_UNTILED_AREA=0 restores 0.1.3; RP6 timing is unverified.
+#ifdef __ANDROID__
+        constexpr bool kViewportAreaDefault = true;
+#else
+        constexpr bool kViewportAreaDefault = kLighterPasses;
+#endif
         const uint32_t s_untiledArea = [] {
             const char* v = std::getenv("NFSMW_UNTILED_AREA");
-            return !v ? (kLighterPasses ? 1u : 0u) : v[0] == '1' ? 1u : strcmp(v, "alt") == 0 ? 2u : 0u;
+            return !v ? (kViewportAreaDefault ? 1u : 0u) : v[0] == '1' ? 1u : strcmp(v, "alt") == 0 ? 2u : 0u;
         }();
-        const bool s_logUntiledArea = [] { const char* v = std::getenv("NFSMW_LOG_UNTILED_AREA"); return v && v[0] == '1'; }();
+        const bool s_logUntiledArea = [] {
+            const char* v = std::getenv("NFSMW_LOG_UNTILED_AREA");
+#ifdef __ANDROID__
+            return !v || v[0] == '1';
+#else
+            return v && v[0] == '1';
+#endif
+        }();
         struct UntiledAreaCounts
         {
             uint64_t cut = 0, whole = 0, clipOff = 0, noViewport = 0, wholeArea = 0, empty = 0, restarts = 0;
