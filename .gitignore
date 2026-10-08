@@ -54,3 +54,10 @@ speedbreaker-bug-report-*.zip
 # Python
 __pycache__/
 *.pyc
+
+# Android build metadata and private signing material
+android/.gradle/
+android/app/.cxx/
+android/local.properties
+*.keystore
+*.jks

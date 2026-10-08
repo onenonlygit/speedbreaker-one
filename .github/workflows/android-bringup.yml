@@ -1,0 +1,64 @@
+name: Android ARM64 bring-up
+on:
+  push:
+    branches: ['android/rp6-bringup']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  platform-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'ndk;28.2.13676358' 'platforms;android-35' 'build-tools;35.0.0' 'cmake;3.22.1'
+      - name: Check guest-word atomics and physical-alias futex wakes
+        run: |
+          mkdir -p build
+          g++ -std=c++20 -D__ANDROID__ -pthread -Iruntime tests/android_atomic_ref_test.cpp -o build/android_atomic_ref_test
+          build/android_atomic_ref_test
+      - name: Build Android dependencies and retain upstream tool patches
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+          scripts/android/prepare_recompiler.sh --headers-only
+          scripts/android/prepare_deps.sh
+      - name: Compile runtime objects without game code
+        run: |
+          cmake -S android -B build/android-check -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/28.2.13676358/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-33 \
+            -DSB_ANDROID_DIAGNOSTICS=ON -DSB_ANDROID_COMPILE_CHECK=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/android-check --target runtime-compile-check -j 4
+      - name: Restore private stable signing key if configured
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SB_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/speedbreaker-one.jks"
+            echo "SB_KEYSTORE=$RUNNER_TEMP/speedbreaker-one.jks" >> "$GITHUB_ENV"
+          fi
+      - name: Package platform diagnostics (not the game)
+        env:
+          SB_STORE_PASSWORD: ${{ secrets.SB_STORE_PASSWORD }}
+          SB_KEY_ALIAS: ${{ secrets.SB_KEY_ALIAS }}
+          SB_KEY_PASSWORD: ${{ secrets.SB_KEY_PASSWORD }}
+        working-directory: android
+        run: ./gradlew --no-daemon -PsbDiagnostics=ON assembleRelease
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpeedBreaker-One-arm64-platform-diagnostics
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Android-native-build-logs
+          path: |
+            android/app/.cxx/**/build_output.txt
+            build/android-check/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
