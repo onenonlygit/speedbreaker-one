@@ -1,3 +1,34 @@
+# SpeedBreaker One — personal Android fork
+
+This is **onenonlygit's personal, AI-assisted Android ARM64 fork** of
+[SpeedBreaker by SpeedBreakerProject / project(u)](https://github.com/SpeedBreakerProject/speedbreaker).
+It is an independent experimental adaptation, not an official upstream Android release.
+Original authors retain credit for SpeedBreaker's recompilation, runtime,
+renderer, UI and artwork. The original banners and screenshots below are retained;
+they illustrate upstream SpeedBreaker and are not Android performance claims.
+
+**Current milestone (October 8, 2026):** one complete Quick Race sprint on a
+Retroid Pocket 6. Roads/world geometry, cars and HUD now render; music and some
+effects play. Engine audio remains missing, performance is roughly 21–30 FPS
+in sampled racing logs at internal 720p, and repeated-race stability is unverified.
+
+- [Download the tested 0.1.2 Android race APK](https://github.com/onenonlygit/speedbreaker-one/releases/download/android-v0.1.2-race/SpeedBreaker-One-arm64-race.apk)
+- [APK status, installation, checksum and metadata](https://github.com/onenonlygit/speedbreaker-one/tree/android/rp6-bringup/builds/android/0.1.2-android-race)
+- [Progress and continuation checkpoint](https://github.com/onenonlygit/speedbreaker-one/blob/android/rp6-bringup/docs/ANDROID_PROGRESS.md)
+- [Active Android source branch](https://github.com/onenonlygit/speedbreaker-one/tree/android/rp6-bringup)
+
+The Android build reads the selected ISO directly through Android's file picker;
+it does not require a second extracted copy. Supply your own supported game disc
+image. No game assets are hosted here. Do not report this fork's Android issues
+as upstream-supported Android bugs.
+
+---
+
+## Original SpeedBreaker documentation and images
+
+The following documentation describes upstream platforms and features. It does
+not imply that every feature is implemented or verified in this Android fork.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/speedbreaker-banner-dark.png">
