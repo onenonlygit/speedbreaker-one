@@ -16,6 +16,9 @@
 #include <cpu/guest_thread.h>
 #include <user/paths.h>
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include <cerrno>
 #include <ctime>
 
@@ -141,6 +144,12 @@ namespace report
                         done += size_t(w);
                     }
                 }
+#ifdef __ANDROID__
+                // Preserve upstream file/ring logging; mirror bounded chunks to logcat.
+                for (size_t pos = 0; pos < size_t(n); pos += 3000)
+                    __android_log_print(ANDROID_LOG_INFO, "SpeedBreakerOne", "%.*s",
+                        int(std::min<size_t>(3000, size_t(n) - pos)), buffer + pos);
+#endif
                 FileWrite(stamped, size);
                 RingAppend(stamped, size);
                 s_chunks.fetch_add(1, std::memory_order_release);

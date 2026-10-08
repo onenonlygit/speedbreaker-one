@@ -1,3 +1,4 @@
+#include <platform/atomic_ref.h>
 // Adapted from Unleashed Recompiled (https://github.com/hedge-dev/UnleashedRecomp),
 // GPL-3.0-or-later. Modified for SpeedBreaker: only functions with real
 // implementations are kept. Unleashed's silent "!!! STUB !!!" functions,
@@ -270,7 +271,7 @@ void RtlLeaveCriticalSection(XRTL_CRITICAL_SECTION* cs)
     if (cs->RecursionCount != 0)
         return;
 
-    std::atomic_ref owningThread(cs->OwningThread);
+    platform::AtomicRef owningThread(cs->OwningThread);
     owningThread.store(0);
     owningThread.notify_one();
 }
@@ -280,7 +281,7 @@ void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
     uint32_t thisThread = g_ppcContext->r13.u32;
     assert(thisThread != NULL);
 
-    std::atomic_ref owningThread(cs->OwningThread);
+    platform::AtomicRef owningThread(cs->OwningThread);
 
     while (true) 
     {
@@ -318,13 +319,13 @@ uint32_t RtlInitializeCriticalSection(XRTL_CRITICAL_SECTION* cs)
 
 void KfReleaseSpinLock(uint32_t* spinLock)
 {
-    std::atomic_ref spinLockRef(*spinLock);
+    platform::AtomicRef spinLockRef(*spinLock);
     spinLockRef = 0;
 }
 
 void KfAcquireSpinLock(uint32_t* spinLock)
 {
-    std::atomic_ref spinLockRef(*spinLock);
+    platform::AtomicRef spinLockRef(*spinLock);
 
     while (true)
     {
@@ -346,13 +347,13 @@ uint64_t KeQueryPerformanceFrequency()
 
 void KeReleaseSpinLockFromRaisedIrql(uint32_t* spinLock)
 {
-    std::atomic_ref spinLockRef(*spinLock);
+    platform::AtomicRef spinLockRef(*spinLock);
     spinLockRef = 0;
 }
 
 void KeAcquireSpinLockAtRaisedIrql(uint32_t* spinLock)
 {
-    std::atomic_ref spinLockRef(*spinLock);
+    platform::AtomicRef spinLockRef(*spinLock);
 
     while (true)
     {
@@ -429,7 +430,7 @@ bool RtlTryEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
     uint32_t thisThread = g_ppcContext->r13.u32;
     assert(thisThread != NULL);
 
-    std::atomic_ref owningThread(cs->OwningThread);
+    platform::AtomicRef owningThread(cs->OwningThread);
 
     uint32_t previousOwner = 0;
 

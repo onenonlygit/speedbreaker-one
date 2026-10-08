@@ -272,6 +272,9 @@ namespace install
             if (fs::is_directory(dir, ec) && std::find(folders.begin(), folders.end(), dir) == folders.end())
                 folders.push_back(dir);
         };
+        #ifdef __ANDROID__
+        add(platform::android::Files() / "imports");
+        #endif
         if (const char* home = std::getenv("HOME"); home && *home)
         {
             fs::path h = home;

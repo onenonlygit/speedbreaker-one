@@ -1,3 +1,4 @@
+#include <platform/atomic_ref.h>
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING).
 //
 // Movies on whole pairs of vblanks.
@@ -158,7 +159,7 @@ PPC_FUNC(sub_825985A0)
         return;
     // The vblank interrupt may have run since the callback set 1; hold only
     // a countdown still at 1 (0 means it already let this swap go).
-    std::atomic_ref countdown(*reinterpret_cast<uint32_t*>(base + device + kDeviceCountdown));
+    platform::AtomicRef countdown(*reinterpret_cast<uint32_t*>(base + device + kDeviceCountdown));
     uint32_t expected = ByteSwap(1u);
     if (countdown.compare_exchange_strong(expected, ByteSwap(2u)))
         s.held++;

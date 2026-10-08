@@ -17,6 +17,10 @@ target_compile_options(XenonUtilsLite PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-include
 
 file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/thirdparty/")
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/platform/android/diagnostics\\.cpp$")
+if(NOT ANDROID)
+    list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/platform/android/")
+endif()
 if(APPLE)
     # Apple's own glue for macOS and iOS (the thermal state) is
     # Objective-C++ on Foundation alone, platform/apple/*.mm. Built with the
@@ -39,7 +43,10 @@ if(IOS)
 endif()
 add_library(o1heap STATIC ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/o1heap/o1heap.c)
 target_include_directories(o1heap PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/o1heap)
-if(IOS)
+if(ANDROID)
+    add_library(SpeedBreaker SHARED ${RUNTIME_SOURCES})
+    target_link_libraries(SpeedBreaker PRIVATE android log)
+elseif(IOS)
     # On iOS the app is linked and signed by Xcode (scripts/ios): the runtime
     # is a static library there, and the app links it with the rest.
     add_library(SpeedBreaker STATIC ${RUNTIME_SOURCES})
@@ -47,7 +54,9 @@ else()
     add_executable(SpeedBreaker ${RUNTIME_SOURCES})
 endif()
 target_include_directories(SpeedBreaker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/kernel)
-find_package(SDL3 REQUIRED CONFIG)
+if(NOT TARGET SDL3::SDL3)
+    find_package(SDL3 REQUIRED CONFIG)
+endif()
 if(IOS)
     # iOS has no Vulkan loader: the app links MoltenVK statically, and the
     # runtime compiles against MoltenVK's own Vulkan headers.
@@ -79,7 +88,7 @@ target_include_directories(SpeedBreaker PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/gene
 # The "What's new" note (ui/whats_new.cpp): this version's entry in
 # CHANGELOG.md, from its "## v<version>" heading to the next "## " one,
 # compiled in (generated/whats_new.inc). An edit of CHANGELOG.md reconfigures.
-set(SB_CHANGELOG ${CMAKE_SOURCE_DIR}/CHANGELOG.md)
+set(SB_CHANGELOG ${CMAKE_CURRENT_SOURCE_DIR}/../CHANGELOG.md)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${SB_CHANGELOG})
 set(SB_WHATS_NEW "")
 if(EXISTS ${SB_CHANGELOG})
@@ -126,7 +135,7 @@ endif()
 # checked on every build but rewritten only when it changes
 # (report/build_info.cmake), so a no-op build stays one.
 add_custom_target(nfsmw_build_info
-    COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/generated/build_info.inc
+    COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/.. -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/generated/build_info.inc
         -DVERSION=${CMAKE_PROJECT_VERSION} -DBUILD_TYPE=${CMAKE_BUILD_TYPE} -P ${CMAKE_CURRENT_SOURCE_DIR}/report/build_info.cmake
     BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/generated/build_info.inc
     VERBATIM)

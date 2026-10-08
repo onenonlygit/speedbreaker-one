@@ -3,6 +3,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#ifdef __ANDROID__
+#include <platform/android/storage.h>
+#endif
 #ifdef __APPLE__
 #include <TargetConditionals.h>
 #endif
@@ -61,6 +64,9 @@ inline const char*& CacheFolderName()
 //   Linux: $XDG_DATA_HOME or ~/.local/share, $XDG_CACHE_HOME or ~/.cache
 inline std::filesystem::path UserDataBase()
 {
+#ifdef __ANDROID__
+    return platform::android::Files() / "data";
+#endif
     const char* home = std::getenv("HOME");
     std::filesystem::path base = home ? home : ".";
 #ifdef __APPLE__
@@ -78,6 +84,9 @@ inline std::filesystem::path UserDataBase()
 
 inline std::filesystem::path CacheBase()
 {
+#ifdef __ANDROID__
+    return platform::android::Files() / "cache";
+#endif
     const char* home = std::getenv("HOME");
     std::filesystem::path base = home ? home : ".";
 #ifdef __APPLE__

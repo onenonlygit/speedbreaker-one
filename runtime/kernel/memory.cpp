@@ -6,6 +6,9 @@
 #ifndef _WIN32
 #include <fcntl.h>
 #include <unistd.h>
+#ifdef __ANDROID__
+#include <platform/android/physical_memory.h>
+#endif
 #ifdef __APPLE__
 #include <mach/mach.h>
 #endif
@@ -13,6 +16,9 @@
 bool Memory::MapPhysicalMirrors()
 {
     constexpr size_t PHYSICAL_SIZE = 0x20000000;  // 512 MB
+#ifdef __ANDROID__
+    return platform::android::MapPhysicalMemory(base, eWindowShift);
+#else
 #ifdef __APPLE__
     // A named memory entry, mapped three times with vm_map. The iOS sandbox
     // refuses shm_open (EPERM); this works there and on macOS alike.
@@ -83,6 +89,7 @@ bool Memory::MapPhysicalMirrors()
     close(fd);
 #endif
     return ok;
+#endif
 }
 #endif
 

@@ -30,6 +30,10 @@
 #include <user/version_check.h>
 
 #include <SDL3/SDL.h>
+#ifdef __ANDROID__
+#include <SDL3/SDL_main.h>
+#include <platform/android/storage.h>
+#endif
 #if defined(__APPLE__) && TARGET_OS_IOS
 #include <SDL3/SDL_main.h>  // SDL starts UIKit and calls main() from it
 #include <platform/ios_files.h>
@@ -269,6 +273,12 @@ namespace
 
 int main(int argc, char** argv)
 {
+#ifdef __ANDROID__
+    setenv("NFSMW_RENDER_SCALE", "1", 0);  // RP6 bring-up: 720p.
+    const auto files = platform::android::Files();
+    std::filesystem::create_directories(files / "imports");
+    chdir(files.c_str());
+#endif
 #if defined(__APPLE__) && TARGET_OS_IOS
     // iOS starts an app in /, which it can't write. Relative paths (test
     // output in build/, a ./game/files development copy) mean the app's
@@ -475,7 +485,7 @@ int main(int argc, char** argv)
     pthread_create(&thread, &attr, GuestMain, &params);
     report::StartWatchdog();  // hang reports (and the NFSMW_TEST_* switches)
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
     // NFSMW_ALLOW_DEBUGGER=1: let gdb/perf attach with Yama ptrace_scope 1.
     if (const char* v = std::getenv("NFSMW_ALLOW_DEBUGGER"); v && v[0] == '1')
         prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
