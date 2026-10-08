@@ -367,6 +367,17 @@ int main(int argc, char** argv)
         fprintf(stderr, "[version] v%s (the last version isn't known: settings.toml didn't load)\n", report::Version());
     // The window must live on the main thread (macOS); the game gets its own.
     bool windowed = video::Initialize();
+#ifdef __ANDROID__
+    // A failed Android Vulkan/frontend init must not accidentally start a
+    // headless guest. Headless is available only as an explicit diagnostic.
+    const char* headless = std::getenv("NFSMW_HEADLESS");
+    if (!windowed && !(headless && headless[0] == '1'))
+    {
+        fprintf(stderr, "[runtime] Android video initialization failed; guest execution not started\n");
+        report::FlushLog();
+        return 1;
+    }
+#endif
     if (!settingsLoaded)
         ui::Toast(settings::LastError(), 12.0);  // a mistake in settings.toml: it was kept as .bad
     report::NoticePreviousCrash();
