@@ -1,0 +1,35 @@
+name: Publish tested Android race checkpoint
+on:
+  push:
+    branches: [android/rp6-bringup]
+    paths:
+      - 'builds/android/0.1.2-android-race/**'
+      - '.github/workflows/android-race-checkpoint.yml'
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Assemble and verify exact device-tested APK
+        working-directory: builds/android/0.1.2-android-race
+        run: |
+          cat SpeedBreaker-One-arm64-race.apk.part-* > SpeedBreaker-One-arm64-race.apk
+          sha256sum -c SHA256SUMS
+      - name: Publish experimental working-race prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag=android-v0.1.2-race
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --target "$GITHUB_SHA" --prerelease \
+              --title 'Android 0.1.2 — first completed Quick Race (experimental)' \
+              --notes-file builds/android/0.1.2-android-race/README.md
+          fi
+          gh release upload "$tag" \
+            builds/android/0.1.2-android-race/SpeedBreaker-One-arm64-race.apk \
+            builds/android/0.1.2-android-race/TEST-INSTRUCTIONS.txt \
+            builds/android/0.1.2-android-race/SHA256SUMS \
+            builds/android/0.1.2-android-race/build.json --clobber

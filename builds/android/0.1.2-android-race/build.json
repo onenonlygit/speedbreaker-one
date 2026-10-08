@@ -1,0 +1,20 @@
+{
+  "commit": "9809202a33be4f823202293612ee8469c984c0f4",
+  "apk_sha256": "38ec818e9c88fb6e20bd569cb0b9fdd914821346aa873803cf6737664ee15db9",
+  "version": "0.1.2-android-race",
+  "build_ids": {
+    "libmain.so": "d859a22468ae25afc6c785619880a38c06b0968b",
+    "libSDL3.so": "d9e57e7444676afebe94d7a2c66e1f7f569e8482",
+    "libc++_shared.so": "7befe631535aa853c4f4ac1293e49dcea34c9b6e"
+  },
+  "guest_exports": 56165,
+  "mode": "optimized debuggable ARM64 release",
+  "xex_sha256": "aebdf3c14d1e4e4ed2c130d94bc1a0e97bd6d5bf39bdfdef33c3909c9cc4ba4c",
+  "apk_bytes": 20791803,
+  "package": "com.onenonlygit.speedbreakerone",
+  "version_code": 3,
+  "certificate_sha256": "29ebbb37c610217ff00755e3731df6a1db46eda4cec45555157704ab545902bf",
+  "device": "Retroid Pocket 6 / Adreno 740",
+  "test_date": "2026-10-08",
+  "status": "User completed one Quick Race sprint; experimental, incomplete audio, poor performance"
+}

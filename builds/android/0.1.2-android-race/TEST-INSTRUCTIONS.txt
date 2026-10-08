@@ -1,0 +1,41 @@
+SpeedBreaker One — 0.1.2 Android race test
+
+For the local AI agent: install and collect evidence on the RP6. Do not uninstall,
+clear app data, copy/extract the ISO, or change the emulator/runtime. Preserve
+existing ISO permission and settings. This APK uses the same signing certificate.
+Keep 720p and use the same Quick Race car/track as the previous failing test.
+Wireless debugging port may change; use the device's current port if needed.
+Commands below assume a bash/macOS/Linux host and files in Downloads.
+
+1. Install over the previous build:
+adb connect 10.0.0.109:35469
+adb -s 10.0.0.109:35469 get-state
+adb -s 10.0.0.109:35469 shell am force-stop com.onenonlygit.speedbreakerone
+adb -s 10.0.0.109:35469 install -r "$HOME/Downloads/SpeedBreaker-One-arm64-race.apk"
+
+2. Start log collection BEFORE launch (leave this terminal running):
+adb -s 10.0.0.109:35469 logcat -c
+adb -s 10.0.0.109:35469 logcat -b all -v threadtime > "$HOME/Downloads/speedbreaker-race-v3-logcat.txt"
+
+3. In another terminal, launch:
+adb -s 10.0.0.109:35469 shell am start -n com.onenonlygit.speedbreakerone/.SpeedBreakerActivity
+
+4. Capture memory at menu, loading, then driving; substitute the stage in filename:
+adb -s 10.0.0.109:35469 shell dumpsys meminfo com.onenonlygit.speedbreakerone > "$HOME/Downloads/speedbreaker-race-v3-menu-memory.txt"
+
+Enter Quick Race. First goal: countdown and two minutes of actual driving.
+If stable, finish the race and start a second race. Check roads/world geometry,
+steering, acceleration/braking, audio and responsiveness. Record stage timestamps.
+Take screenshots once driving and when geometry is missing. Do not switch to
+Career before collecting this Quick Race result.
+
+5. Collect these before force-stopping or relaunching after any failure:
+adb -s 10.0.0.109:35469 shell dumpsys activity exit-info com.onenonlygit.speedbreakerone > "$HOME/Downloads/speedbreaker-race-v3-exit-info.txt"
+adb -s 10.0.0.109:35469 exec-out run-as com.onenonlygit.speedbreakerone tar -cf - files/data/speedbreaker/logs > "$HOME/Downloads/speedbreaker-race-v3-session-logs.tar"
+adb -s 10.0.0.109:35469 exec-out screencap -p > "$HOME/Downloads/speedbreaker-race-v3-screen.png"
+
+Stop logcat with Ctrl-C after collecting evidence. Return logs, exit info, memory
+snapshots and screenshots, plus whether countdown/driving/race completion worked.
+The session logs now identify SPIR-V fallback recovery and keep failed pipeline
+captures by session. Offline shader validation passed; RP6 driving is unverified.
+The symbols ZIP is for host-side crash analysis, not installation on the RP6.
