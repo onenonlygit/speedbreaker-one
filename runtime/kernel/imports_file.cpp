@@ -359,17 +359,21 @@ uint32_t NtReadFile(uint32_t fileHandle, uint32_t eventHandle, uint32_t apcRouti
         const size_t count = pos < file->discSize ?
             size_t(std::min<uint64_t>(length, file->discSize - pos)) : 0;
         static thread_local std::vector<uint8_t> discBounce;
-        discBounce.resize(count);
+        discBounce.resize(std::min<size_t>(count, 256 * 1024));
         std::string error;
-        if (count && !file->discReader->Read(pos, discBounce.data(), count, error))
+        while (size_t(n) < count)
         {
-            fprintf(stderr, "[file] ISO read of %s failed: %s\n", file->guestPath.c_str(), error.c_str());
-            Complete(iosb, STATUS_UNSUCCESSFUL, 0);
-            SignalEvent(eventHandle);
-            return STATUS_UNSUCCESSFUL;
+            size_t chunk = std::min(count - size_t(n), discBounce.size());
+            if (!file->discReader->Read(pos + uint64_t(n), discBounce.data(), chunk, error))
+            {
+                fprintf(stderr, "[file] ISO read of %s failed: %s\n", file->guestPath.c_str(), error.c_str());
+                Complete(iosb, STATUS_UNSUCCESSFUL, 0);
+                SignalEvent(eventHandle);
+                return STATUS_UNSUCCESSFUL;
+            }
+            memcpy(dst + n, discBounce.data(), chunk);
+            n += ssize_t(chunk);
         }
-        if (count) memcpy(dst, discBounce.data(), count);
-        n = ssize_t(count);
     }
     else
     while (uint32_t(n) < length)
