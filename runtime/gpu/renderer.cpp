@@ -253,7 +253,16 @@ namespace gpu::renderer
         // Upload ring: draw constants, converted indices and texture staging.
         // One slot per in-flight submission, so a slot is reused only after
         // the GPU finished with it.
-        constexpr uint32_t kSlots = 12;
+        // The ring is also bound as one storage-buffer descriptor. Vulkan's
+        // minimum maxStorageBufferRange is 128 MiB (also the RP6's limit), so
+        // the old 12 x 16 MiB descriptor exceeded that device's limit.
+        // Begin waits for the slot's fence before reusing it, including when
+        // a busy frame wraps this smaller Android ring more than once.
+#ifdef __ANDROID__
+        constexpr uint32_t kSlots = 4;
+#else
+        constexpr uint32_t kSlots = 8;
+#endif
         constexpr VkDeviceSize kSlotSize = 16ull << 20;
         constexpr VkDeviceSize kRingSize = kSlots * kSlotSize;
         VkBuffer s_ring = VK_NULL_HANDLE;
@@ -307,7 +316,12 @@ namespace gpu::renderer
         const bool s_imagePool = [] { const char* v = std::getenv("NFSMW_IMAGE_POOL"); return !v || v[0] != '0'; }();
         const VkDeviceSize s_blockSize = [] {
             const char* v = std::getenv("NFSMW_IMAGE_BLOCK_MB");
-            return VkDeviceSize(v ? std::clamp(std::atoi(v), 16, 1024) : 64) << 20;
+#ifdef __ANDROID__
+            constexpr int defaultMb = 32;
+#else
+            constexpr int defaultMb = 64;
+#endif
+            return VkDeviceSize(v ? std::clamp(std::atoi(v), 16, 1024) : defaultMb) << 20;
         }();
         std::vector<std::unique_ptr<ImageBlock>> s_blocks;  // in use (command processor)
         // Empty blocks by memory type, the newest last, under s_spareMutex:
@@ -1595,13 +1609,8 @@ namespace gpu::renderer
             return vs.module;
         }
 
-        VkShaderModule PixelVariant(Shader& ps, uint32_t outputs, uint32_t inputs, bool alphaTest)
+        std::string PixelPreamble(uint32_t outputs, uint32_t inputs, bool alphaTest)
         {
-            uint32_t key = (outputs & 0xF) | ((inputs & 0xFFFF) << 4) | (alphaTest ? 1u << 20 : 0);
-            std::lock_guard lock(ps.compileMutex);
-            auto it = ps.variants.find(key);
-            if (it != ps.variants.end())
-                return it->second;
             std::string preamble;
             for (int i = 0; i < 4; i++)
                 if (outputs & (1u << i))
@@ -1611,6 +1620,17 @@ namespace gpu::renderer
                     preamble += std::format("#define IN{}\n", i);
             if (alphaTest)
                 preamble += "#define ALPHA_TEST\n";
+            return preamble;
+        }
+
+        VkShaderModule PixelVariant(Shader& ps, uint32_t outputs, uint32_t inputs, bool alphaTest)
+        {
+            uint32_t key = (outputs & 0xF) | ((inputs & 0xFFFF) << 4) | (alphaTest ? 1u << 20 : 0);
+            std::lock_guard lock(ps.compileMutex);
+            auto it = ps.variants.find(key);
+            if (it != ps.variants.end())
+                return it->second;
+            std::string preamble = PixelPreamble(outputs, inputs, alphaTest);
             std::string log;
             auto spirv = CompileGlsl(ps.info.glsl, GLSLANG_STAGE_FRAGMENT, log, preamble);
             VkShaderModule module = VK_NULL_HANDLE;
@@ -2448,6 +2468,60 @@ namespace gpu::renderer
             }
         }
 
+        // Keep the exact sources/variants and pipeline state for rejected
+        // Android pipelines beside the session logs. Driver -13 alone does
+        // not tell us which shader or interface failed. Bound disk output to
+        // 16 unique failures per process; never dump the ISO or guest memory.
+        void DumpPipelineFailure(const PipelineKey& key, const Shader& vs, const Shader& ps,
+            uint32_t outputs, uint32_t inputs, VkResult result)
+        {
+#ifdef __ANDROID__
+            static std::mutex mutex;
+            static std::unordered_set<PipelineKey, PipelineKeyHash> dumped;
+            std::lock_guard lock(mutex);
+            if (dumped.size() >= 16 || !dumped.insert(key).second)
+                return;
+            auto dir = GetUserPath() / "logs" / "pipeline_failures";
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            if (ec)
+                return;
+            auto stem = std::format("{:016x}_{:016x}_{:016x}", key.vs, key.ps, uint64_t(PipelineKeyHash{}(key)));
+            bool ok = true;
+            auto write = [&](const std::string& suffix, const void* data, size_t bytes) {
+                FILE* f = fopen((dir / (stem + suffix)).c_str(), "wb");
+                if (!f) { ok = false; return; }
+                bool written = fwrite(data, 1, bytes, f) == bytes;
+                ok = (fclose(f) == 0 && written) && ok;
+            };
+            auto shader = [&](const Shader& sh, glslang_stage_t stage, const std::string& variant, const char* suffix) {
+                std::string preamble = s_splitMemory ? "#define SPLIT_MEMORY\n" + variant : variant;
+                std::string source = sh.info.glsl;
+                // #version must remain first in the standalone GLSL file.
+                source.insert(source.find('\n') + 1, preamble);
+                write(std::string(suffix) + ".glsl", source.data(), source.size());
+                // CompileGlsl cached these exact modules before linking. Copy
+                // that cache entry without recompiling or retaining SPIR-V.
+                auto cache = ShaderCacheFile(sh.info.glsl, stage, preamble);
+                if (s_shaderCacheEnabled && std::filesystem::exists(cache, ec))
+                {
+                    std::filesystem::copy_file(cache, dir / (stem + suffix + ".spv"),
+                        std::filesystem::copy_options::overwrite_existing, ec);
+                    if (ec) ok = false;
+                }
+            };
+            shader(vs, GLSLANG_STAGE_VERTEX, {}, ".vert");
+            shader(ps, GLSLANG_STAGE_FRAGMENT, PixelPreamble(outputs, inputs, (key.raster >> 5) & 1), ".frag");
+            auto state = std::format("result={}\nvs={:016x}\nps={:016x}\ntopology={}\nrestart={}\ncolorFormats={},{},{},{}\ndepthFormat={}\nraster={:08x}\ndepthControl={:08x}\ncolorMask={:08x}\noutputs={:x}\ninputs={:x}\nblend={:08x},{:08x},{:08x},{:08x}\n",
+                int(result), key.vs, key.ps, key.topology, key.restart,
+                key.colorFormats[0], key.colorFormats[1], key.colorFormats[2], key.colorFormats[3],
+                key.depthFormat, key.raster, key.depthControl, key.colorMask, outputs, inputs,
+                key.blend[0], key.blend[1], key.blend[2], key.blend[3]);
+            write(".txt", state.data(), state.size());
+            fprintf(stderr, "[renderer] failed-pipeline diagnostics %s: %s\n", ok ? "saved" : "incomplete", stem.c_str());
+#endif
+        }
+
         // Compiles the pipeline for `key` (and the SPIR-V it needs). Runs on a
         // pipeline worker: touches only its arguments, the shaders' own
         // locked modules and the (internally synchronized) pipeline cache.
@@ -2574,6 +2648,7 @@ namespace gpu::renderer
             {
                 fprintf(stderr, "[renderer] pipeline vs %016llx ps %016llx failed: %d\n",
                     (unsigned long long)key.vs, (unsigned long long)key.ps, int(r));
+                DumpPipelineFailure(key, vs, ps, outputs, inputs, r);
                 pipeline = VK_NULL_HANDLE;
             }
             return pipeline;
@@ -2606,8 +2681,14 @@ namespace gpu::renderer
         std::unordered_map<PipelineKey, std::shared_ptr<PendingPipeline>, PipelineKeyHash> s_pendingPipelines;
         const uint32_t s_pipelineThreads = [] {
             if (const char* v = std::getenv("NFSMW_PIPELINE_THREADS"))
-                return uint32_t(std::atoi(v));
+                return uint32_t(std::clamp(std::atoi(v), 0, 16));
+#ifdef __ANDROID__
+            // Keep the peak of concurrent driver/compiler allocations down
+            // during world loading on a device with shared CPU/GPU RAM.
+            return 1u;
+#else
             return std::clamp(std::thread::hardware_concurrency() / 3, 1u, 4u);
+#endif
         }();
         const int64_t s_pipelineWaitUs = [] { const char* v = std::getenv("NFSMW_PIPELINE_WAIT_US"); return v ? int64_t(std::atoll(v)) : 3000; }();
         const bool s_logPipelines = std::getenv("NFSMW_PIPELINE_LOG") != nullptr;
@@ -5803,7 +5884,18 @@ void main()
             // ~100 ms here. The zeros are never read: SyncShadow copies a page
             // before its first use. NFSMW_SHADOW_PREFAULT=0 leaves the faults
             // to the first sync.
-            static const bool prefault = [] { const char* v = std::getenv("NFSMW_SHADOW_PREFAULT"); return !v || v[0] != '0'; }();
+            static const bool prefault = [] {
+                if (const char* v = std::getenv("NFSMW_SHADOW_PREFAULT"))
+                    return v[0] != '0';
+#ifdef __ANDROID__
+                // SyncShadow initializes each range before the GPU uses it.
+                // Eagerly touching all 512 MiB consumes shared system RAM,
+                // including pages the current scene never needs.
+                return false;
+#else
+                return true;
+#endif
+            }();
             auto prefaultStart = std::chrono::steady_clock::now();
             if (prefault)
                 for (VkDeviceSize offset = 0; offset < kSharedSize; offset += 4096)
@@ -5871,7 +5963,8 @@ void main()
                 cached ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT
                        : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-            fprintf(stderr, "[renderer] upload ring: memory type %u (flags %X)\n", mai.memoryTypeIndex,
+            fprintf(stderr, "[renderer] upload ring: %llu MB in %u fence-protected slots, memory type %u (flags %X)\n",
+                (unsigned long long)(kRingSize >> 20), kSlots, mai.memoryTypeIndex,
                 s_memProps.memoryTypes[mai.memoryTypeIndex].propertyFlags);
             Check(vkAllocateMemory(s_dev, &mai, nullptr, &s_ringMemory), "vkAllocateMemory(ring)");
             vkBindBufferMemory(s_dev, s_ring, s_ringMemory, 0);
@@ -6193,6 +6286,15 @@ void main()
         {
             VkPhysicalDeviceProperties props;
             vkGetPhysicalDeviceProperties(s_vk->physical, &props);
+            if (kRingSize > props.limits.maxStorageBufferRange)
+            {
+                fprintf(stderr, "[renderer] upload ring exceeds storage-buffer limit (%llu > %u bytes)\n",
+                    (unsigned long long)kRingSize, props.limits.maxStorageBufferRange);
+                return false;
+            }
+            fprintf(stderr, "[renderer] shader limits: vertex outputs %u, fragment inputs %u, storage buffers/stage %u, samplers/stage %u; pipeline workers %u\n",
+                props.limits.maxVertexOutputComponents, props.limits.maxFragmentInputComponents,
+                props.limits.maxPerStageDescriptorStorageBuffers, props.limits.maxPerStageDescriptorSamplers, s_pipelineThreads);
             ReadRenderScale(props);
             const char* split = std::getenv("NFSMW_SPLIT_MEMORY");
             s_splitMemory = split ? split[0] == '1' : props.limits.maxStorageBufferRange < kSharedSize;
@@ -8366,6 +8468,34 @@ void main()
 
     MemoryStats GetMemoryStats()
     {
+#ifdef __ANDROID__
+        // RSS is broader than the texture counter in [perf]. Kernel-only
+        // status reads every five seconds also show swap pressure as a race
+        // loads; no expensive full smaps scan on the command processor.
+        static auto last = std::chrono::steady_clock::time_point{};
+        auto now = std::chrono::steady_clock::now();
+        if (now - last >= std::chrono::seconds(5))
+        {
+            last = now;
+            if (FILE* f = fopen("/proc/self/status", "r"))
+            {
+                char line[256];
+                unsigned long long rss = 0, swap = 0, anon = 0, file = 0, shared = 0;
+                while (fgets(line, sizeof(line), f))
+                {
+                    if (sscanf(line, "VmRSS: %llu", &rss) == 1) continue;
+                    if (sscanf(line, "VmSwap: %llu", &swap) == 1) continue;
+                    if (sscanf(line, "RssAnon: %llu", &anon) == 1) continue;
+                    if (sscanf(line, "RssFile: %llu", &file) == 1) continue;
+                    sscanf(line, "RssShmem: %llu", &shared);
+                }
+                fclose(f);
+                fprintf(stderr, "[android-memory] RSS %llu MB (anon %llu, file %llu, shared %llu), swap %llu MB; GPU buffers: shadow %llu, ring %llu MB\n",
+                    rss / 1024, anon / 1024, file / 1024, shared / 1024, swap / 1024,
+                    (unsigned long long)(s_shadowMode ? kSharedSize >> 20 : 0), (unsigned long long)(kRingSize >> 20));
+            }
+        }
+#endif
         MemoryStats m{};
         for (const auto& [key, rt] : s_targets)
         {

@@ -722,6 +722,32 @@ static void AllPhysicalAliases()
     }
 }
 
+static void LazyShadowInitialization()
+{
+    printf("shadow first-use initialization without prefaulting\n");
+    constexpr uint32_t physical = 0x1E000000;
+    auto* shadow = static_cast<uint8_t*>(mmap(nullptr, kPhysicalSize, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    CHECK(shadow != MAP_FAILED, "could not map shadow");
+    if (shadow == MAP_FAILED) return;
+    // Poison only this host page: the rest of the 512 MiB stays untouched.
+    memset(shadow + physical, 0xCD, s_hostPage);
+    memset(Guest(physical), 0x5A, 64);
+    writewatch::EnableShadow(shadow);
+    CHECK(writewatch::SyncShadow(physical, 64, 0) == 0, "first copy unexpectedly blocked");
+    CHECK(memcmp(shadow + physical, Guest(physical), s_hostPage) == 0,
+        "first use did not initialize the whole page, including its zero bytes");
+    uint64_t sequence = writewatch::Current();
+    *(Guest(physical) + 19) = 0xA7;
+    CHECK(writewatch::SyncShadow(physical, 64, sequence) == 0, "dirty copy unexpectedly blocked");
+    CHECK(shadow[physical + 19] == 0xA7, "CPU write was not copied to shadow");
+    auto before = Stats();
+    CHECK(writewatch::SyncShadow(physical, 64, writewatch::Current()) == 0, "clean copy unexpectedly blocked");
+    CHECK(Stats().uploadBytes == before.uploadBytes, "unchanged shadow page copied again");
+    writewatch::EnableShadow(nullptr);
+    munmap(shadow, kPhysicalSize);
+}
+
 static int Run()
 {
     s_subpages = Stats().subpages;
@@ -754,6 +780,7 @@ static int Run()
     UntileBehindRead({ page += 0x10000 }, submission);
     s_gpuQuit.store(true);
     gpu.join();
+    LazyShadowInitialization();
     printf(g_failures ? "%d failure(s)\n" : "all passed\n", g_failures);
     return g_failures ? 1 : 0;
 }

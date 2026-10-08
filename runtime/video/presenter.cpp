@@ -443,6 +443,18 @@ namespace video
             s_swapReadable = (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
             info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
             info.preTransform = caps.currentTransform;
+#ifdef __ANDROID__
+            // Our final pass and ImGui render in the window's orientation.
+            // Matching currentTransform would claim we have pre-rotated both,
+            // making Android present landscape content sideways. Let the
+            // compositor perform the surface rotation until we implement
+            // pre-rotation for the final pass and the UI together.
+            if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+                info.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+            fprintf(stderr, "[video] surface rotation: current %X, supported %X, selected %X; image %ux%u, window %dx%d\n",
+                unsigned(caps.currentTransform), unsigned(caps.supportedTransforms), unsigned(info.preTransform),
+                s_swapExtent.width, s_swapExtent.height, w, h);
+#endif
             info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
             // V-Sync off: mailbox (no tearing, newest frame) where there is
             // one, else immediate.
