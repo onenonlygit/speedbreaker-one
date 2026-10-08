@@ -37,7 +37,14 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/28.2.13676358/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-33 \
             -DSB_ANDROID_DIAGNOSTICS=ON -DSB_ANDROID_COMPILE_CHECK=ON -DCMAKE_BUILD_TYPE=Release
-          cmake --build build/android-check --target runtime-compile-check -j 4
+          cmake --build build/android-check --target runtime-compile-check android-write-watch-test -j 4
+      - name: Run runtime write-watch suite on the host
+        run: |
+          clang++ -std=c++20 -O2 -pthread -Iruntime -Iruntime/kernel -Iruntime/thirdparty/o1heap \
+            -Ibuild/android-check/compile-check-headers -Itools/XenonRecomp/XenonUtils \
+            -Itools/XenonRecomp/thirdparty/simde tests/write_watch_test.cpp \
+            runtime/kernel/write_watch.cpp runtime/cpu/guest_time.cpp -o build/write-watch-host-test
+          build/write-watch-host-test
       - name: Restore private stable signing key if configured
         env:
           KEYSTORE_BASE64: ${{ secrets.SB_KEYSTORE_BASE64 }}
@@ -57,6 +64,11 @@ jobs:
         with:
           name: SpeedBreaker-One-arm64-platform-diagnostics
           path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Android-write-watch-test
+          path: build/android-check/android-write-watch-test
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:

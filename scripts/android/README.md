@@ -88,9 +88,10 @@ gamepad and audio paths remain. Android runtime stderr is mirrored to logcat tag
 SpeedBreakerOne. Saves/game/logs live under internal `data/speedbreaker/`, caches
 under `cache/speedbreaker/`, imports under `imports/`. The initial importer scans
 that private folder (debug adb run-as can populate it); SAF UX is not implemented.
-The runtime starts with NFSMW_RENDER_SCALE=1 for 720p bring-up. Android shared-
-library symbol extraction needs refinement: upstream's ELF reader uses
-/proc/self/exe, which is the app launcher, not libmain.so.
+The runtime starts with NFSMW_RENDER_SCALE=1 for 720p bring-up. Android crash symbols are read from the loaded libmain.so using its own ASLR
+bias, with .dynsym fallback for stripped APK libraries. The original desktop
+/proc/self/exe path stays unchanged. Offline symbolication still requires the
+matching unstripped library.
 
 ## Signing
 
@@ -120,3 +121,30 @@ Send both files. If it exits before the report exists, send full logcat plus:
 `adb shell dumpsys activity exit-info com.onenonlygit.speedbreakerone`.
 This APK cannot test menus, races or FPS. Those tests start after generated code
 is integrated, the full runtime links and the USA game is installed.
+
+## Foundational validation
+
+CI builds and runs the actual upstream write-watch suite on the Linux host,
+including additional A/C/E alias-fault checks. Both watch-subpage configurations
+pass on a 4 KiB host. This validates the algorithm on Linux, not Android's
+SELinux, Bionic signal context or the RP6 GPU interaction.
+
+The separate `android-write-watch-test` executable builds for Android ARM64 using
+the real Android shared-memory backend and AArch64 ESR read/write fault decoding.
+It contains no game code. The test Memory constructor never registers or calls
+guest functions. The runtime's compile-fixture image constants are irrelevant to
+this memory-algorithm test; it cannot load NFSMW.
+
+For future device validation (not required before supplying the XEX):
+
+```sh
+cmake --build build/android-check --target android-write-watch-test
+adb push build/android-check/android-write-watch-test /data/local/tmp/
+adb shell chmod 755 /data/local/tmp/android-write-watch-test
+adb shell /data/local/tmp/android-write-watch-test
+```
+
+Vulkan device initialization now reports each missing required extension before
+creation. Android also logs sampled-image/transfer support for BC1/BC2/BC3/BC5.
+These checks diagnose driver compatibility; a BC decoder fallback is not yet
+implemented. Suspend/resume work is deferred until basic game execution works.

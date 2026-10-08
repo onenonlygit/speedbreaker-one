@@ -15,6 +15,9 @@
 // SIGSEGV and SIGBUS go to HandleFault as main.cpp sends them. Under a second.
 #include <stdafx.h>
 #include <kernel/write_watch.h>
+#ifdef __ANDROID__
+#include <platform/android/physical_memory.h>
+#endif
 
 #include <chrono>
 #include <csignal>
@@ -50,6 +53,31 @@ static uint8_t* Guest(uint32_t physical, uint32_t window = 0xA0000000)
     return g_memory.base + window + physical;
 }
 
+#if defined(__linux__) && defined(__aarch64__)
+static bool FaultWasWrite(const ucontext_t* uc)
+    {
+        struct Record { uint32_t magic, size; };
+        constexpr uint32_t kEsrMagic = 0x45535201;
+        const uint8_t* p = uc->uc_mcontext.__reserved;
+        const uint8_t* end = p + sizeof(uc->uc_mcontext.__reserved);
+        while (p + sizeof(Record) + sizeof(uint64_t) <= end)
+        {
+            Record head;
+            memcpy(&head, p, sizeof(head));
+            if (head.magic == 0 || head.size < sizeof(Record))
+                break;
+            if (head.magic == kEsrMagic)
+            {
+                uint64_t esr;
+                memcpy(&esr, p + sizeof(Record), sizeof(esr));
+                return (esr >> 6) & 1;
+            }
+            p += head.size;
+        }
+        return true;
+    }
+#endif
+
 static void FaultHandler(int sig, siginfo_t* info, void* context)
 {
     bool isWrite = true;
@@ -57,6 +85,8 @@ static void FaultHandler(int sig, siginfo_t* info, void* context)
     isWrite = (static_cast<ucontext_t*>(context)->uc_mcontext->__es.__esr >> 6) & 1;  // ESR WnR
 #elif defined(__linux__) && defined(__x86_64__)
     isWrite = (static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_ERR] & 2) != 0;
+#elif defined(__linux__) && defined(__aarch64__)
+    isWrite = FaultWasWrite(static_cast<ucontext_t*>(context));
 #else
     (void)context;
 #endif
@@ -74,6 +104,9 @@ static bool MapMemory()
     if (reserved == MAP_FAILED)
         return false;
     g_memory.base = static_cast<uint8_t*>(reserved);
+#ifdef __ANDROID__
+    return platform::android::MapPhysicalMemory(g_memory.base, g_memory.eWindowShift);
+#else
     char name[64];
     snprintf(name, sizeof(name), "/ww-test-%d", int(getpid()));
     int fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
@@ -88,9 +121,14 @@ static bool MapMemory()
         if (window == 0xE0000000u)
             g_memory.eWindowShift = uint32_t(offset);
         if (mmap(g_memory.base + window, kPhysicalSize - offset, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, off_t(offset)) == MAP_FAILED)
+        {
+            close(fd);
             return false;
+        }
     }
+    close(fd);
     return true;
+#endif
 }
 
 static writewatch::GuardStats Stats()
@@ -666,6 +704,24 @@ static void UntileBehindRead(Quad h, uint64_t& submission)
     }
 }
 
+static void AllPhysicalAliases()
+{
+    printf("write-watch faults through all three physical aliases\n");
+    constexpr uint32_t physical = 0x00800000;
+    uint8_t value = 1;
+    for (uint32_t window : { 0xA0000000u, 0xC0000000u, 0xE0000000u })
+    {
+        uint64_t sequence = Load(physical, kGuestPage);
+        auto before = Stats();
+        uint32_t offset = physical - (window == 0xE0000000u ? g_memory.eWindowShift : 0);
+        *reinterpret_cast<volatile uint8_t*>(Guest(offset, window) + 100) = value;
+        CHECK(Stats().faults == before.faults + 1, "store via %08x did not fault", window);
+        CHECK(writewatch::WrittenSince(physical, kGuestPage, sequence), "store via %08x did not dirty physical page", window);
+        CHECK(*(Guest(physical) + 100) == value, "store via %08x not visible through A alias", window);
+        value++;
+    }
+}
+
 static int Run()
 {
     s_subpages = Stats().subpages;
@@ -680,6 +736,7 @@ static int Run()
 
     uint64_t submission = 1;
     uint32_t page = 0x01000000;  // 16 MB, every test in a host page of its own (64 KB apart)
+    AllPhysicalAliases();
     NeighbourStore({ page });
     StoreWhileOpen({ page += 0x10000 });
     EpochAfterRevalidation({ page += 0x10000 });

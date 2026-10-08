@@ -20,3 +20,14 @@ file(WRITE "${CHECK_HEADERS}/ui_font.inc" "${FONT_BYTES}\n")
 file(WRITE "${CHECK_HEADERS}/whats_new.inc" "constexpr const char kWhatsNewEntry[] = \"Compile-only Android check\";\n")
 execute_process(COMMAND ${CMAKE_COMMAND} "-DSOURCE_DIR=${SB_ROOT}" "-DOUTPUT=${CHECK_HEADERS}/build_info.inc" -DVERSION=0.1.0 -DBUILD_TYPE=CompileOnly -P "${SB_ROOT}/runtime/report/build_info.cmake" COMMAND_ERROR_IS_FATAL ANY)
 target_compile_options(runtime-compile-check PRIVATE -fno-strict-aliasing -UNDEBUG)
+
+# Game-free native test: uses the runtime write-watch and real Android backing.
+# Memory's test constructor never registers/looks up guest functions, so the
+# compile-fixture image constants are not executed as guest code.
+add_executable(android-write-watch-test "${SB_ROOT}/tests/write_watch_test.cpp"
+    "${SB_ROOT}/runtime/kernel/write_watch.cpp" "${SB_ROOT}/runtime/cpu/guest_time.cpp"
+    "${SB_ROOT}/runtime/platform/android/physical_memory.cpp")
+get_target_property(CHECK_INCLUDE_DIRS runtime-compile-check INCLUDE_DIRECTORIES)
+target_include_directories(android-write-watch-test PRIVATE ${CHECK_INCLUDE_DIRS})
+target_link_libraries(android-write-watch-test PRIVATE android dl)
+target_compile_options(android-write-watch-test PRIVATE -fno-strict-aliasing -UNDEBUG)

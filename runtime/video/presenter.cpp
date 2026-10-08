@@ -1283,6 +1283,22 @@ void main()
         vkEnumerateDeviceExtensionProperties(s_physical, nullptr, &extAvail, nullptr);
         std::vector<VkExtensionProperties> avail(extAvail);
         vkEnumerateDeviceExtensionProperties(s_physical, nullptr, &extAvail, avail.data());
+        // Diagnose the exact unsupported capability, before device creation
+        // collapses it into VK_ERROR_EXTENSION_NOT_PRESENT.
+        bool missingRequiredExtension = false;
+        for (const char* required : devExts)
+        {
+            bool found = std::any_of(avail.begin(), avail.end(), [required](const VkExtensionProperties& e) {
+                return strcmp(e.extensionName, required) == 0;
+            });
+            if (!found)
+            {
+                fprintf(stderr, "[video] required renderer extension missing: %s (GPU: %s)\n", required, props.deviceName);
+                missingRequiredExtension = true;
+            }
+        }
+        if (missingRequiredExtension)
+            return false;
         bool presentId = false, presentWait = false, hostImport = false, shadingRate = false;
         for (auto& e : avail)
         {
@@ -1351,6 +1367,19 @@ void main()
         features.depthClamp = supported.depthClamp;
         features.samplerAnisotropy = supported.samplerAnisotropy;
         features.textureCompressionBC = supported.textureCompressionBC;
+#ifdef __ANDROID__
+        if (!supported.textureCompressionBC)
+            fprintf(stderr, "[video] GPU lacks BC compression; Xenos BC textures require a decoder adaptation or compatible driver\n");
+        for (VkFormat format : { VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC2_UNORM_BLOCK,
+            VK_FORMAT_BC3_UNORM_BLOCK, VK_FORMAT_BC5_UNORM_BLOCK })
+        {
+            VkFormatProperties fp{};
+            vkGetPhysicalDeviceFormatProperties(s_physical, format, &fp);
+            fprintf(stderr, "[video] BC format=%d optimal sampled=%d transfer-dst=%d\n", int(format),
+                bool(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT),
+                bool(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT));
+        }
+#endif
         features.shaderInt16 = supported.shaderInt16;
         VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamicRendering{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR };
         dynamicRendering.dynamicRendering = VK_TRUE;

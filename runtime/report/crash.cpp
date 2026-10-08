@@ -75,7 +75,17 @@ namespace report
 
         void LoadElfSymbols()
         {
+#ifdef __ANDROID__
+            // The process executable is app_process64. Symbols must come
+            // from the loaded runtime DSO, including its own ASLR bias.
+            Dl_info runtimeInfo{};
+            if (!dladdr(reinterpret_cast<const void*>(&LoadElfSymbols), &runtimeInfo) ||
+                !runtimeInfo.dli_fname || !runtimeInfo.dli_fbase)
+                return;
+            int fd = open(runtimeInfo.dli_fname, O_RDONLY | O_CLOEXEC);
+#else
             int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+#endif
             if (fd < 0)
                 return;
             auto readAt = [fd](void* to, size_t size, uint64_t offset) {
@@ -96,7 +106,16 @@ namespace report
             for (const Elf64_Shdr& section : sections)
                 if (ok && section.sh_type == SHT_SYMTAB && section.sh_link < sections.size())
                     symtab = &section;
-            if (symtab)
+#ifdef __ANDROID__
+            // Packaged Android libraries normally have .symtab stripped.
+            // Exported .dynsym functions still give useful crash names;
+            // retain the unstripped build library for offline symbolication.
+            if (!symtab)
+                for (const Elf64_Shdr& section : sections)
+                    if (ok && section.sh_type == SHT_DYNSYM && section.sh_link < sections.size())
+                        symtab = &section;
+#endif
+            if (symtab && symtab->sh_entsize == sizeof(Elf64_Sym))
             {
                 const Elf64_Shdr& strtab = sections[symtab->sh_link];
                 symbols.resize(symtab->sh_size / sizeof(Elf64_Sym));
@@ -107,11 +126,15 @@ namespace report
                     symbols.clear();
                 // Symbol values are link-time addresses: add the load bias
                 // (a PIE's load address).
+#ifdef __ANDROID__
+                uintptr_t bias = reinterpret_cast<uintptr_t>(runtimeInfo.dli_fbase);
+#else
                 uintptr_t bias = 0;
                 dl_iterate_phdr([](dl_phdr_info* info, size_t, void* out) {
                     *static_cast<uintptr_t*>(out) = info->dlpi_addr;
                     return 1;  // the first object is the executable
                 }, &bias);
+#endif
                 std::vector<ElfFunction> functions;
                 functions.reserve(symbols.size());
                 for (const Elf64_Sym& sym : symbols)
