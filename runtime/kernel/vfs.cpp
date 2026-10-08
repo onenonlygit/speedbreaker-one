@@ -4,6 +4,7 @@
 #include "xam.h"
 
 #include <user/paths.h>
+#include <install/disc_mount.h>
 
 namespace vfs
 {
@@ -127,6 +128,13 @@ namespace vfs
         }
 
         std::filesystem::path current = resolved.host;
+        if (discmount::Contains(current))
+        {
+            for (auto part : parts) current /= std::string(part);
+            auto picked = discmount::Resolve(current);
+            if (!picked) return std::nullopt;
+            return Resolved{*picked, true};
+        }
         for (size_t i = 0; i < parts.size(); i++)
         {
             bool last = i + 1 == parts.size();

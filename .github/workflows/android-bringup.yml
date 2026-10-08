@@ -26,6 +26,12 @@ jobs:
           mkdir -p build
           g++ -std=c++20 -D__ANDROID__ -pthread -Iruntime tests/android_atomic_ref_test.cpp -o build/android_atomic_ref_test
           build/android_atomic_ref_test
+      - name: Check direct ISO mount and descriptor reads
+        run: |
+          g++ -std=c++20 -O2 -UNDEBUG -pthread -Iruntime tests/disc_mount_test.cpp \
+            runtime/install/disc_mount.cpp runtime/install/disc_source.cpp runtime/install/manifest.cpp \
+            runtime/install/sha256.cpp runtime/install/result.cpp -o build/disc_mount_test
+          build/disc_mount_test
       - name: Build Android dependencies and retain upstream tool patches
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"

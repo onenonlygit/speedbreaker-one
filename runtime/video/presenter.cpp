@@ -41,6 +41,9 @@ namespace video
         SDL_Window* s_window = nullptr;
         VkInstance s_instance = VK_NULL_HANDLE;
         VkSurfaceKHR s_surface = VK_NULL_HANDLE;
+#ifdef __ANDROID__
+        std::atomic<bool> s_androidSurfaceStale{false};
+#endif
         VkPhysicalDevice s_physical = VK_NULL_HANDLE;
         VkDevice s_device = VK_NULL_HANDLE;
         uint32_t s_queueFamily = 0;
@@ -1720,6 +1723,11 @@ void main()
                 report::FlushLog();
                 break;
             case SDL_EVENT_DID_ENTER_FOREGROUND:
+#ifdef __ANDROID__
+                // The document picker can replace Android's native window.
+                // Rebuild its Vulkan surface on the render thread before use.
+                s_androidSurfaceStale.store(true, std::memory_order_release);
+#endif
                 ResumeGame();
                 break;
             default:
@@ -1948,7 +1956,11 @@ void main()
             {
                 // No GPU work while the app is inactive: the first frame
                 // after the resume rebuilds it.
-                if (s_background.load(std::memory_order_acquire))
+                if (s_background.load(std::memory_order_acquire)
+#ifdef __ANDROID__
+                    || s_androidSurfaceStale.load(std::memory_order_acquire)
+#endif
+                    )
                     s_swapchainStale = true;
                 else
                 {
@@ -1993,6 +2005,24 @@ void main()
             hid::Resume();  // the game's last rumble again
             s_inputSuspended = false;
         }
+#ifdef __ANDROID__
+        if (s_androidSurfaceStale.exchange(false, std::memory_order_acq_rel))
+        {
+            WaitIdle();
+            DestroySwapchain();
+            if (s_surface) vkDestroySurfaceKHR(s_instance, s_surface, nullptr);
+            s_surface = VK_NULL_HANDLE;
+            if (!SDL_Vulkan_CreateSurface(s_window, s_instance, nullptr, &s_surface))
+            {
+                fprintf(stderr, "[video] Android surface not ready: %s\n", SDL_GetError());
+                s_androidSurfaceStale.store(true, std::memory_order_release);
+                SDL_Delay(16);
+                return true;
+            }
+            fprintf(stderr, "[video] rebuilt Android surface after foreground transition\n");
+            s_swapchainStale = true;
+        }
+#endif
         if (s_swapchainStale)
         {
             s_swapchainStale = false;
@@ -2111,6 +2141,15 @@ void main()
         }
         uint32_t imageIndex;
         VkResult acquire = vkAcquireNextImageKHR(s_device, s_swapchain, UINT64_MAX, f.imageAvailable, VK_NULL_HANDLE, &imageIndex);
+#ifdef __ANDROID__
+        if (acquire == VK_ERROR_SURFACE_LOST_KHR)
+        {
+            s_androidSurfaceStale.store(true, std::memory_order_release);
+            std::lock_guard lock(s_captureMutex);
+            for (auto& promise : captures) s_captureRequests.push_back(std::move(promise));
+            return true;
+        }
+#endif
         if (acquire == VK_ERROR_OUT_OF_DATE_KHR)
         {
             WaitIdle();
@@ -2121,6 +2160,11 @@ void main()
             for (auto& promise : captures)
                 s_captureRequests.push_back(std::move(promise));
             return true;
+        }
+        if (acquire != VK_SUCCESS && acquire != VK_SUBOPTIMAL_KHR)
+        {
+            fprintf(stderr, "[video] swapchain image acquisition failed: %d\n", int(acquire));
+            return false;
         }
         vkResetFences(s_device, 1, &f.inFlight);
 
@@ -2520,6 +2564,11 @@ void main()
             vkDestroyBuffer(s_device, captureBuffer, nullptr);
             vkFreeMemory(s_device, captureMemory, nullptr);
         }
+#ifdef __ANDROID__
+        if (present == VK_ERROR_SURFACE_LOST_KHR)
+            s_androidSurfaceStale.store(true, std::memory_order_release);
+        else
+#endif
         if (present == VK_ERROR_OUT_OF_DATE_KHR || present == VK_SUBOPTIMAL_KHR)
         {
             WaitIdle();

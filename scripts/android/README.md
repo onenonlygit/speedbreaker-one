@@ -92,8 +92,13 @@ API 33 supports existing backtrace calls. Full write-watch stays enabled.
 SDLActivity provides landscape/fullscreen/cutout support. Upstream SDL lifecycle,
 gamepad and audio paths remain. Android runtime stderr is mirrored to logcat tag
 SpeedBreakerOne. Saves/game/logs live under internal `data/speedbreaker/`, caches
-under `cache/speedbreaker/`, imports under `imports/`. The initial importer scans
-that private folder (debug adb run-as can populate it); SAF UX is not implemented.
+under `cache/speedbreaker/`, Android startup selects a local ISO through the system Files picker and retains
+its read permission. The XDVDFS parser duplicates the authorized descriptor;
+guest disc reads, file attributes and directory enumeration use a read-only
+ISO mount. No second ISO or extracted game folder is created. Saves and shader
+caches remain in the app folders. The selected URI is remembered for next launch;
+a missing or revoked document returns to the picker. Non-seekable providers are
+rejected with a local-storage hint. Legacy imports remain under `imports/`.
 The runtime starts with NFSMW_RENDER_SCALE=1 for 720p bring-up. Android crash symbols are read from the loaded libmain.so using its own ASLR
 bias, with .dynsym fallback for stripped APK libraries. The original desktop
 /proc/self/exe path stays unchanged. Offline symbolication still requires the
@@ -160,4 +165,15 @@ adb shell /data/local/tmp/android-write-watch-test
 Vulkan device initialization now reports each missing required extension before
 creation. Android also logs sampled-image/transfer support for BC1/BC2/BC3/BC5.
 These checks diagnose driver compatibility; a BC decoder fallback is not yet
-implemented. Suspend/resume work is deferred until basic game execution works.
+implemented. The Vulkan surface is rebuilt when returning from the Android document picker
+(or another foreground transition). Full gameplay suspend/resume testing remains
+deferred; picker return and persistent-document access need device validation.
+
+## Direct ISO validation
+
+`disc_mount_test` constructs a synthetic XDVDFS image and exercises the real
+parser through both pathname and descriptor access. It checks case-insensitive
+lookup, file sizes, directory enumeration, source descriptor lifetime after
+close/unlink, bounds and concurrent independent reads. It runs without game
+assets and is included in CI. The full native build and Android APK compile
+with the mounted-disc guest I/O path; on-device game startup is still unverified.

@@ -22,6 +22,7 @@
 #include <install/install_cli.h>
 #include <install/locate.h>
 #include <install/sha256.h>
+#include <install/disc_mount.h>
 #include <report/report.h>
 #include <ui/installer_screen.h>
 #include <ui/ui.h>
@@ -33,6 +34,7 @@
 #ifdef __ANDROID__
 #include <SDL3/SDL_main.h>
 #include <platform/android/storage.h>
+#include <platform/android/disc_picker.h>
 #endif
 #if defined(__APPLE__) && TARGET_OS_IOS
 #include <SDL3/SDL_main.h>  // SDL starts UIKit and calls main() from it
@@ -399,6 +401,7 @@ int main(int argc, char** argv)
             }).detach();
 
     std::filesystem::path xexPath;
+    std::vector<uint8_t> discXex;
     std::string gameOrigin;  // for the system summary
     if (argc > 1)
     {
@@ -409,6 +412,21 @@ int main(int argc, char** argv)
             SetGamePath(std::filesystem::absolute(xexPath).parent_path());
         gameOrigin = "the XEX on the command line";
     }
+#ifdef __ANDROID__
+    else if (windowed)
+    {
+        auto selected = platform::android::ChooseDisc([] { return video::RunFrame(); });
+        if (!selected) { video::Shutdown(); return 0; }
+        std::string error;
+        if (!discmount::Mount(selected->source, error))
+        { fprintf(stderr, "[disc] mount failed: %s\n", error.c_str()); report::FlushLog(); return 1; }
+        SetGamePath(discmount::Root());
+        xexPath = discmount::Root() / "default.xex";
+        discXex = std::move(selected->xex);
+        gameOrigin = "ISO selected with Android Files: " + selected->name;
+        platform::android::RememberDisc();
+    }
+#endif
     else if (std::optional<install::GameInstall> game = install::FindGameInstall())
     {
         SetGamePath(game->path);
@@ -454,7 +472,7 @@ int main(int argc, char** argv)
     }
     fprintf(stderr, "[runtime] game files: %s\n", GetGamePath().string().c_str());
 
-    std::vector<uint8_t> file = LoadFile(xexPath);
+    std::vector<uint8_t> file = discXex.empty() ? LoadFile(xexPath) : std::move(discXex);
     if (file.empty())
     {
         fprintf(stderr, "[runtime] cannot read %s\n", xexPath.string().c_str());

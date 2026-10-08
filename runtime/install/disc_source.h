@@ -90,6 +90,10 @@ namespace install
     // (meaning its folder). On failure `source` is null, except as
     // OpenOptions::allowTruncated describes.
     Result OpenDiscSource(const std::filesystem::path& path, std::unique_ptr<DiscSource>& source, const OpenOptions& options = {});
+    // Read an already-authorized image descriptor (Android SAF). Duplicates it;
+    // the caller retains ownership. No path reopening or image copying.
+    Result OpenDiscImageDescriptor(int descriptor, std::string_view displayName,
+        std::unique_ptr<DiscSource>& source, const OpenOptions& options = {});
 
     // Streams a file through SHA-256 in fixed-size chunks.
     Result HashFile(const DiscSource& source, const DiscFile& file, Sha256Digest& digest, const std::atomic<bool>* cancel = nullptr);

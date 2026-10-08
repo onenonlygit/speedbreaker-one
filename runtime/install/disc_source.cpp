@@ -382,10 +382,10 @@ namespace install
             return Fail(Error::NotADiscImage, name + " is not an Xbox 360 disc image.");
         }
 
-        Result OpenImage(const fs::path& path, std::unique_ptr<DiscSource>& source, const OpenOptions& options)
+        Result OpenImage(const fs::path& path, std::unique_ptr<DiscSource>& source, const OpenOptions& options, int descriptor = -1)
         {
             auto image = std::make_shared<ImageFile>();
-            image->fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+            image->fd = descriptor >= 0 ? fcntl(descriptor, F_DUPFD_CLOEXEC, 0) : open(path.c_str(), O_RDONLY | O_CLOEXEC);
             if (image->fd < 0)
                 return Fail(Error::NotFound, std::format("Cannot open {}: {}.", path.string(), strerror(errno)), path.string());
             struct stat st;
@@ -645,6 +645,16 @@ namespace install
         if (PathEqualsIgnoreCase(path.filename().string(), "default.xex"))
             return OpenFolder(path.parent_path().empty() ? fs::path(".") : path.parent_path(), source);
         return OpenImage(path, source, options);
+    }
+
+    Result OpenDiscImageDescriptor(int descriptor, std::string_view displayName,
+        std::unique_ptr<DiscSource>& source, const OpenOptions& options)
+    {
+        source.reset();
+        if (descriptor < 0) return Fail(Error::ReadError, "Invalid disc image descriptor.");
+        fs::path name = fs::path(displayName).filename();
+        if (name.empty()) name = "disc.iso";
+        return OpenImage(name, source, options, descriptor);
     }
 
     Result HashFile(const DiscSource& source, const DiscFile& file, Sha256Digest& digest, const std::atomic<bool>* cancel)

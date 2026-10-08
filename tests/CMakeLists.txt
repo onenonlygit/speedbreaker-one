@@ -16,6 +16,8 @@ function(sb_test name)
 endfunction()
 
 sb_test(block_ranges_test)
+sb_test(disc_mount_test SOURCES ${RT}/install/disc_mount.cpp ${RT}/install/disc_source.cpp
+    ${RT}/install/manifest.cpp ${RT}/install/sha256.cpp ${RT}/install/result.cpp)
 sb_test(zpd_report_test)
 sb_test(picture_fit_test SOURCES ${RT}/video/picture_fit.cpp)
 sb_test(refresh_fit_test SOURCES ${RT}/video/refresh_fit.cpp)

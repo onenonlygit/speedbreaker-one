@@ -12,6 +12,7 @@
 #include "dispatcher.h"
 #include "function.h"
 #include "vfs.h"
+#include <install/disc_mount.h>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -56,6 +57,13 @@ namespace
 
     std::optional<HostAttributes> Stat(const std::filesystem::path& path, bool readOnly)
     {
+        if (discmount::Contains(path))
+        {
+            auto a = discmount::Stat(path);
+            if (!a) return std::nullopt;
+            return HostAttributes{a->size, uint64_t(FILETIME_EPOCH_DIFFERENCE),
+                (a->directory ? ATTR_DIRECTORY : ATTR_NORMAL) | ATTR_READONLY};
+        }
         struct stat st;
         if (stat(path.c_str(), &st) != 0)
             return std::nullopt;
@@ -114,6 +122,8 @@ static_assert(offsetof(X_FILE_DIRECTORY_INFORMATION, fileName) == 0x40);
 struct FileObject final : Waitable
 {
     int fd = -1;
+    std::unique_ptr<install::FileReader> discReader;
+    uint64_t discSize = 0;
     std::filesystem::path path;
     std::string guestPath;
     bool readOnly = false;
@@ -230,8 +240,11 @@ uint32_t NtCreateFile(be<uint32_t>* handleOut, uint32_t desiredAccess, XOBJECT_A
     }
 
     std::error_code ec;
-    bool exists = std::filesystem::exists(resolved->host, ec);
-    bool isDir = exists && std::filesystem::is_directory(resolved->host, ec);
+    const bool image = discmount::Contains(resolved->host);
+    auto discAttributes = image ? discmount::Stat(resolved->host) : std::nullopt;
+    bool exists = image ? bool(discAttributes) : std::filesystem::exists(resolved->host, ec);
+    bool isDir = image ? (discAttributes && discAttributes->directory) :
+        (exists && std::filesystem::is_directory(resolved->host, ec));
     bool wantDir = (createOptions & FILE_DIRECTORY_FILE) != 0;
 
     auto fail = [&](uint32_t status, uint32_t info) {
@@ -248,7 +261,8 @@ uint32_t NtCreateFile(be<uint32_t>* handleOut, uint32_t desiredAccess, XOBJECT_A
         return fail(STATUS_FILE_IS_A_DIRECTORY, 0);
     if (exists && !isDir && wantDir)
         return fail(STATUS_NOT_A_DIRECTORY, 0);
-    if (resolved->readOnly && (wantsWrite || !exists))
+    if (resolved->readOnly && (wantsWrite || !exists || disposition == FILE_SUPERSEDE ||
+        disposition == FILE_OVERWRITE || disposition == FILE_OVERWRITE_IF))
         return fail(STATUS_ACCESS_DENIED, 0);
 
     uint32_t action = FILE_OPENED;
@@ -266,6 +280,18 @@ uint32_t NtCreateFile(be<uint32_t>* handleOut, uint32_t desiredAccess, XOBJECT_A
             action = FILE_CREATED;
         }
         file->isDirectory = true;
+    }
+    else if (image)
+    {
+        std::string error;
+        file->discReader = discmount::Open(resolved->host, error);
+        file->discSize = discAttributes->size;
+        if (!file->discReader)
+        {
+            fprintf(stderr, "[file] disc open failed: %s\n", error.c_str());
+            DestroyKernelObject(file);
+            return fail(STATUS_ACCESS_DENIED, 0);
+        }
     }
     else
     {
@@ -326,6 +352,26 @@ uint32_t NtReadFile(uint32_t fileHandle, uint32_t eventHandle, uint32_t apcRouti
     // at lr 82621950.)
     uint8_t* dst = static_cast<uint8_t*>(buffer);
     ssize_t n = 0;
+    if (file->discReader)
+    {
+        // Read via ordinary memory, then copy into watched guest memory. The
+        // parser uses pread and each reader clamps accesses to its disc file.
+        const size_t count = pos < file->discSize ?
+            size_t(std::min<uint64_t>(length, file->discSize - pos)) : 0;
+        static thread_local std::vector<uint8_t> discBounce;
+        discBounce.resize(count);
+        std::string error;
+        if (count && !file->discReader->Read(pos, discBounce.data(), count, error))
+        {
+            fprintf(stderr, "[file] ISO read of %s failed: %s\n", file->guestPath.c_str(), error.c_str());
+            Complete(iosb, STATUS_UNSUCCESSFUL, 0);
+            SignalEvent(eventHandle);
+            return STATUS_UNSUCCESSFUL;
+        }
+        if (count) memcpy(dst, discBounce.data(), count);
+        n = ssize_t(count);
+    }
+    else
     while (uint32_t(n) < length)
     {
         ssize_t got = pread(file->fd, dst + n, length - uint32_t(n), off_t(pos + uint64_t(n)));
@@ -570,9 +616,16 @@ uint32_t NtQueryDirectoryFile(uint32_t fileHandle, uint32_t eventHandle, uint32_
             dir->pattern = "*";
         dir->entries.clear();
         std::error_code ec;
-        for (auto& e : std::filesystem::directory_iterator(dir->path, ec))
-            if (vfs::WildcardMatch(dir->pattern, e.path().filename().string()))
-                dir->entries.push_back(e.path());
+        if (discmount::Contains(dir->path))
+        {
+            for (auto& path : discmount::Children(dir->path))
+                if (vfs::WildcardMatch(dir->pattern, path.filename().string()))
+                    dir->entries.push_back(path);
+        }
+        else
+            for (auto& e : std::filesystem::directory_iterator(dir->path, ec))
+                if (vfs::WildcardMatch(dir->pattern, e.path().filename().string()))
+                    dir->entries.push_back(e.path());
         std::sort(dir->entries.begin(), dir->entries.end());
         dir->nextEntry = 0;
     }
