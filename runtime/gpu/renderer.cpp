@@ -6398,8 +6398,20 @@ void main()
             qpci.queryType = VK_QUERY_TYPE_TIMESTAMP;
             qpci.queryCount = kSlots * 2;
             if (const char* v = std::getenv("NFSMW_GPU_TIMING"); v && v[0] == '1')
-                if (vkCreateQueryPool(s_dev, &qpci, nullptr, &s_timestamps) != VK_SUCCESS)
+            {
+                uint32_t count = 0;
+                vkGetPhysicalDeviceQueueFamilyProperties(s_vk->physical, &count, nullptr);
+                std::vector<VkQueueFamilyProperties> families(count);
+                vkGetPhysicalDeviceQueueFamilyProperties(s_vk->physical, &count, families.data());
+                if (s_vk->queueFamily < count && families[s_vk->queueFamily].timestampValidBits &&
+                    vkCreateQueryPool(s_dev, &qpci, nullptr, &s_timestamps) == VK_SUCCESS)
+                    fprintf(stderr, "[renderer] submission GPU timestamps enabled\n");
+                else
+                {
                     s_timestamps = VK_NULL_HANDLE;
+                    fprintf(stderr, "[renderer] submission GPU timestamps unavailable\n");
+                }
+            }
             if (s_profileFrame >= 0)
             {
                 qpci.queryCount = 512;

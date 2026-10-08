@@ -118,3 +118,14 @@ symbol checks. The APK exports 56,165 translated guest functions.
 Device collection must run locally: cloud cannot connect to the RP6 LAN.
 Last wireless ADB endpoint was `10.0.0.109:35469`; Android can change the port.
 Capture logcat before launch and exit-info before relaunch after failure.
+
+## Follow-up phase: 0.1.3 audio/measurement (not yet device tested)
+
+After the 0.1.2 checkpoint was saved, user authorized continuing with remaining
+usage. Android playback now requests stereo while retaining six-channel guest
+mixer input, so SDL downmixes before output. Functional dummy-device test against
+pinned SDL passes all six individual channels. Aggregate channel RMS/non-finite
+counts, XMA stats and supported GPU timestamps are enabled for Android. The
+optimized signed ARM64 APK builds; no engine-audio recovery or performance gain
+has been established on RP6. See ANDROID_AUDIO.md. 0.1.2 remains the last known
+working device-tested APK; do not relabel it as 0.1.3 or overwrite its release.

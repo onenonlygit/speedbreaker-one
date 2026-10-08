@@ -277,6 +277,10 @@ int main(int argc, char** argv)
 {
 #ifdef __ANDROID__
     setenv("NFSMW_RENDER_SCALE", "1", 0);  // RP6 bring-up: 720p.
+    // Bounded aggregate diagnostics for the audio/performance test build.
+    setenv("NFSMW_AUDIO_LOG", "1", 0);
+    setenv("NFSMW_XMA_STATS", "1", 0);
+    setenv("NFSMW_GPU_TIMING", "1", 0);
     const auto files = platform::android::Files();
     std::filesystem::create_directories(files / "imports");
     chdir(files.c_str());

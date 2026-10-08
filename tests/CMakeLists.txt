@@ -46,3 +46,6 @@ add_executable(vblank_lock_sim ${CMAKE_CURRENT_SOURCE_DIR}/vblank_lock_sim.cpp $
 target_include_directories(vblank_lock_sim PRIVATE ${RT})
 # Synthetic shader microcode; no copyrighted shader captures or XEX required.
 sb_test(shader_variants_test SOURCES ${RT}/gpu/shader_translator.cpp ${RT}/gpu/xenos/ucode.cpp)
+# Pinned SDL from the runtime target: dummy-device routing, no game required.
+sb_test(audio_downmix_test)
+target_link_libraries(audio_downmix_test PRIVATE SDL3::SDL3)

@@ -6,7 +6,9 @@
 // (256 samples x 6 channels, planar big-endian float).
 //
 // Frames go to an SDL3 audio stream (5.1 float; SDL downmixes to whatever
-// the device has). The callback runs like the hardware's: one frame every
+// the device has). Android opens stereo playback first, then sets the stream
+// input to the game's six channels, so the backend cannot silently discard
+// center/surround channels on a stereo handheld. The callback runs like the hardware's: one frame every
 // 5.33 ms, evenly (the game's voices hold only a couple of frames of
 // decoded audio). Calling it in
 // bursts of whatever the device pulls at once (1024+ samples on PipeWire)
@@ -90,12 +92,29 @@ namespace
             return;
         }
         SDL_AudioSpec spec{ SDL_AUDIO_F32, int(CHANNELS), int(SAMPLE_RATE) };
+#ifdef __ANDROID__
+        // Opening with six channels made AAudio negotiate a six-channel
+        // device on the RP6, bypassing SDL downmixing. Keep the game's mix
+        // intact but request stereo at the physical output.
+        if (const char* v = std::getenv("NFSMW_ANDROID_SURROUND"); !v || v[0] != '1')
+            spec.channels = 2;
+#endif
         SDL_AudioStream* stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
         if (!stream)
         {
             fprintf(stderr, "[audio] no playback device: %s (silent)\n", SDL_GetError());
             return;
         }
+#ifdef __ANDROID__
+        SDL_AudioSpec guestSpec{ SDL_AUDIO_F32, int(CHANNELS), int(SAMPLE_RATE) };
+        if (!SDL_SetAudioStreamFormat(stream, &guestSpec, nullptr))
+        {
+            fprintf(stderr, "[audio] six-channel mixer input setup failed: %s (silent)\n", SDL_GetError());
+            SDL_DestroyAudioStream(stream);
+            return;
+        }
+        fprintf(stderr, "[audio] Android six-channel mixer -> %d-channel playback request\n", spec.channels);
+#endif
         {
             // It opens paused. Opened while the game is suspended, it stays
             // so until apu::ResumeOutput starts it.
@@ -356,6 +375,15 @@ uint32_t XAudioSubmitRenderDriverFrame(uint32_t driver, void* samples)
     static const bool logLevels = std::getenv("NFSMW_AUDIO_LOG") != nullptr;
     if (logLevels)
     {
+        static double channelSquares[CHANNELS]{};
+        static uint32_t invalidSamples = 0;
+        for (uint32_t i = 0; i < SAMPLES_PER_FRAME; ++i)
+            for (uint32_t c = 0; c < CHANNELS; ++c)
+            {
+                float v = out[i * CHANNELS + c];
+                if (std::isfinite(v)) channelSquares[c] += double(v) * v;
+                else ++invalidSamples;
+            }
         static double sumSquares = 0;
         static float peak = 0;
         static uint32_t frames = 0;
@@ -366,8 +394,16 @@ uint32_t XAudioSubmitRenderDriverFrame(uint32_t driver, void* samples)
         }
         if (++frames == 375)
         {
-            fprintf(stderr, "[audio] level: peak %.3f, rms %.4f\n", peak,
-                std::sqrt(sumSquares / (375.0 * SAMPLES_PER_FRAME * CHANNELS)));
+            fprintf(stderr, "[audio] level: peak %.3f, rms %.4f | channel RMS FL %.4f FR %.4f FC %.4f LFE %.4f SL %.4f SR %.4f | non-finite %u\n", peak,
+                std::sqrt(sumSquares / (375.0 * SAMPLES_PER_FRAME * CHANNELS)),
+                std::sqrt(channelSquares[0] / (375.0 * SAMPLES_PER_FRAME)),
+                std::sqrt(channelSquares[1] / (375.0 * SAMPLES_PER_FRAME)),
+                std::sqrt(channelSquares[2] / (375.0 * SAMPLES_PER_FRAME)),
+                std::sqrt(channelSquares[3] / (375.0 * SAMPLES_PER_FRAME)),
+                std::sqrt(channelSquares[4] / (375.0 * SAMPLES_PER_FRAME)),
+                std::sqrt(channelSquares[5] / (375.0 * SAMPLES_PER_FRAME)), invalidSamples);
+            for (double& v : channelSquares) v = 0;
+            invalidSamples = 0;
             sumSquares = 0;
             peak = 0;
             frames = 0;
