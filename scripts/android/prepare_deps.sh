@@ -15,12 +15,31 @@ if [ "${1:-}" = "--probe-only" ]; then exit 0; fi
 if [ ! -d "$ROOT/tools/glslang-android" ]; then
     git clone --depth 1 --branch 15.1.0 https://github.com/KhronosGroup/glslang.git "$ROOT/tools/glslang-android"
 fi
+# glslang 15.1.0's known_good.json pins these revisions. The Android driver
+# needs optimized SPIR-V; merely requesting optimization in the C API does
+# nothing when glslang was built with ENABLE_OPT=OFF.
+checkout_pinned() {
+    local directory="$1" repository="$2" revision="$3"
+    if [ ! -d "$directory/.git" ]; then
+        mkdir -p "$directory"
+        git init -q "$directory"
+    fi
+    if ! git -C "$directory" cat-file -e "$revision^{commit}" 2>/dev/null; then
+        git -C "$directory" fetch --depth 1 "$repository" "$revision"
+    fi
+    git -C "$directory" checkout --detach "$revision"
+}
+checkout_pinned "$ROOT/tools/glslang-android/External/spirv-tools" \
+    https://github.com/KhronosGroup/SPIRV-Tools.git 4d2f0b40bfe290dea6c6904dafdf7fd8328ba346
+checkout_pinned "$ROOT/tools/glslang-android/External/spirv-tools/external/spirv-headers" \
+    https://github.com/KhronosGroup/SPIRV-Headers.git 3f17b2af6784bfa2c5aa5dbb8e0e74a607dd8b3b
 "$CMAKE" -S "$ROOT/tools/glslang-android" -B "$ROOT/build/glslang-android" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-33 -DANDROID_STL=c++_shared \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DENABLE_GLSLANG_BINARIES=OFF \
-    -DENABLE_OPT=OFF -DBUILD_TESTING=OFF
+    -DENABLE_OPT=ON -DBUILD_TESTING=OFF -DGLSLANG_TESTS=OFF \
+    -DSPIRV_SKIP_TESTS=ON -DSPIRV_SKIP_EXECUTABLES=ON
 "$CMAKE" --build "$ROOT/build/glslang-android" -j "$JOBS"
 "$CMAKE" --install "$ROOT/build/glslang-android"
 TARBALL="$ROOT/tools/ffmpeg-src/ffmpeg-7.1.1.tar.xz"

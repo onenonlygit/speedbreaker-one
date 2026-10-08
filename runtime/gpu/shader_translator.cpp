@@ -94,12 +94,16 @@ uint memWord(uint byteAddress)
 uint vmem(uint byteAddress)
 {
     uint a = byteAddress & 0x1FFFFFFFu;
-    for (int r = 0; r < 4; r++)
-    {
-        uint d = a - pc.vfRedirect[r].x;
-        if (d < pc.vfRedirect[r].y)
-            return g_ring[(pc.vfRedirect[r].z + d) >> 2];
-    }
+    // Constant indices let mobile compilers keep these in registers instead
+    // of lowering a loop with dynamically indexed push-constant arrays.
+    uint d = a - pc.vfRedirect[0].x;
+    if (d < pc.vfRedirect[0].y) return g_ring[(pc.vfRedirect[0].z + d) >> 2];
+    d = a - pc.vfRedirect[1].x;
+    if (d < pc.vfRedirect[1].y) return g_ring[(pc.vfRedirect[1].z + d) >> 2];
+    d = a - pc.vfRedirect[2].x;
+    if (d < pc.vfRedirect[2].y) return g_ring[(pc.vfRedirect[2].z + d) >> 2];
+    d = a - pc.vfRedirect[3].x;
+    if (d < pc.vfRedirect[3].y) return g_ring[(pc.vfRedirect[3].z + d) >> 2];
     return memLoad(a >> 2);
 }
 
@@ -1033,6 +1037,9 @@ vec3 cubeDirection(vec3 c)
         if (stage == ShaderStage::Pixel)
             regCount = std::max(regCount, 16u);  // interpolators land in r0..r15
         result.registerCount = regCount;
+        std::string resetRegisters;
+        for (uint32_t i = 0; i < regCount; i++)
+            resetRegisters += std::format("    r[{}] = vec4(0.0);\n", i);
 
         std::string g = ShaderCommonGlsl();
         g += kHelpers;
@@ -1095,6 +1102,11 @@ vec4 constRel(int index, int rel)
             g += R"(
 uint fetchIndex(uint i)
 {
+#if defined(VERTEX_PRIMITIVE_MODE) && VERTEX_PRIMITIVE_MODE == 0
+    // The renderer supplies ordinary indices through vkCmdDrawIndexed.
+    // Only rectangle expansion fetches the guest index buffer itself.
+    return i;
+#else
     if (pc.indexAddress == 0u)
         return i;
     if ((pc.indexInfo & 1u) != 0u)
@@ -1107,12 +1119,12 @@ uint fetchIndex(uint i)
     bool firstInHigh = endian == 2u || endian == 3u;
     bool high = ((i & 1u) != 0u) != firstInHigh;
     return high ? (word >> 16) : (word & 0xFFFFu);
+#endif
 }
 
 void runVertex(uint logicalIndex)
 {
-    for (int i = 0; i < R_COUNT; i++) r[i] = vec4(0.0);
-    for (int i = 0; i < 16; i++) o_interpT[i] = vec4(0.0);
+@@VS_REGISTER_INIT@@@@VS_INTERPOLATOR_INIT@@
     p0 = false; a0 = 0; aL = 0; ps = 0.0;
     o_position = vec4(0.0, 0.0, 0.0, 1.0);
     r[0].x = float(fetchIndex(logicalIndex) + pc.indexOffset);
@@ -1123,7 +1135,17 @@ void runVertex(uint logicalIndex)
 void main()
 {
     uint vid = uint(gl_VertexIndex);
+#if defined(VERTEX_PRIMITIVE_MODE) && VERTEX_PRIMITIVE_MODE == 0
+    // Ordinary geometry: run once, with no rectangle corner arrays or loop.
+    runVertex(vid);
+    vec4 pos = o_position;
+@@VS_DIRECT_OUTPUTS@@
+#else
+#ifdef VERTEX_PRIMITIVE_MODE
+    uint mode = uint(VERTEX_PRIMITIVE_MODE);
+#else
     uint mode = (pc.indexInfo >> 3) & 3u;   // 0 as is, 1 rectangle list, 2 quad list
+#endif
     // runVertex() has ONE call site: compilers inline every call, and the
     // rectangle's synthesised corner used to add three more copies of the
     // whole shader (RADV took ~10x longer to compile every vertex shader).
@@ -1161,7 +1183,9 @@ void main()
             for (int i = 0; i < 16; i++) it[i] = it[i] + o_interpT[i] - it0[i];
         }
     }
-@@VS_OUTPUTS@@    // PA_CL_VTE_CNTL formats (as Xenia): bit 1 W is not 1/W, bit 2 XY were
+@@VS_OUTPUTS@@
+#endif
+    // PA_CL_VTE_CNTL formats (as Xenia): bit 1 W is not 1/W, bit 2 XY were
     // already divided by W, bit 3 Z was.
     if ((pc.flags & 2u) == 0u) pos.w = 1.0 / pos.w;
     if ((pc.flags & 4u) != 0u) pos.xy *= pos.w;
@@ -1180,7 +1204,7 @@ void main()
         else
         {
             g += "\nvoid main()\n{\n";
-            g += "    for (int i = 0; i < R_COUNT; i++) r[i] = vec4(0.0);\n";
+            g += resetRegisters;
             for (uint32_t i = 0; i < std::min(16u, regCount); i++)
                 g += std::format("#ifdef IN{0}\n    r[{0}] = i_i{0};\n#endif\n", i);
             g += t.body;
@@ -1214,12 +1238,24 @@ void main()
         }
         if (stage == ShaderStage::Vertex)
         {
-            std::string outs;
+            std::string outs, directOuts;
             for (uint32_t i = 0; i < 16; i++)
                 if (result.interpolatorMask & (1u << i))
+                {
                     outs += std::format("    o_i{0} = it[{0}];\n", i);
+                    directOuts += std::format("    o_i{0} = o_interpT[{0}];\n", i);
+                }
             size_t at = g.find("@@VS_OUTPUTS@@");
             g.replace(at, strlen("@@VS_OUTPUTS@@"), outs);
+            at = g.find("@@VS_DIRECT_OUTPUTS@@");
+            g.replace(at, strlen("@@VS_DIRECT_OUTPUTS@@"), directOuts);
+            at = g.find("@@VS_REGISTER_INIT@@");
+            g.replace(at, strlen("@@VS_REGISTER_INIT@@"), resetRegisters);
+            std::string resetInterpolators;
+            for (uint32_t i = 0; i < 16; i++)
+                resetInterpolators += std::format("    o_interpT[{}] = vec4(0.0);\n", i);
+            at = g.find("@@VS_INTERPOLATOR_INIT@@");
+            g.replace(at, strlen("@@VS_INTERPOLATOR_INIT@@"), resetInterpolators);
         }
         // Absolute constant reads: packed slot numbers (the count of used
         // constants below), unless the shader also addresses them relatively.

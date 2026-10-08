@@ -19,6 +19,7 @@
 #include <video/presenter.h>
 #include <video/picture_fit.h>
 #include <user/paths.h>
+#include <report/report.h>
 #include <user/settings.h>
 #include <game/ultrawide.h>
 
@@ -1353,8 +1354,9 @@ namespace gpu::renderer
             uint64_t hash;
             TranslatedShader info;         // immutable once loaded
             std::mutex compileMutex;
-            bool vertexCompiled = false;
-            VkShaderModule module = VK_NULL_HANDLE;  // VS
+            // VS variants by primitive expansion mode. Ordinary triangle/line
+            // draws do not carry the rectangle synthesis path into the driver.
+            std::unordered_map<uint32_t, VkShaderModule> vertices;
             // PS variants by (colour outputs, interpolator inputs, alpha test).
             std::unordered_map<uint32_t, VkShaderModule> variants;
         };
@@ -1398,14 +1400,19 @@ namespace gpu::renderer
         // NFSMW_SHADER_CACHE=0 disables it.
         const bool s_shaderCacheEnabled = [] { const char* v = std::getenv("NFSMW_SHADER_CACHE"); return !v || v[0] != '0'; }();
 
-        std::filesystem::path ShaderCacheFile(const std::string& source, glslang_stage_t stage, const std::string& preamble)
+        std::filesystem::path ShaderCacheFile(const std::string& source, glslang_stage_t stage, const std::string& preamble,
+            bool legacySpirv = false)
         {
             uint64_t h = 0xCBF29CE484222325ull;
             auto mix = [&](const void* data, size_t size) {
                 for (size_t i = 0; i < size; i++)
                     h = (h ^ static_cast<const uint8_t*>(data)[i]) * 0x100000001B3ull;
             };
-            const uint32_t format = 1;  // bump when the compile options below change
+#ifdef __ANDROID__
+            const uint32_t format = legacySpirv ? 3 : 2;  // optimized SPIR-V 1.3 / 1.5
+#else
+            const uint32_t format = 1;
+#endif
             mix(&format, sizeof(format));
             mix(&stage, sizeof(stage));
             mix(preamble.data(), preamble.size());
@@ -1415,16 +1422,16 @@ namespace gpu::renderer
         }
 
         std::vector<uint32_t> CompileGlslUncached(const std::string& source, glslang_stage_t stage, std::string& log,
-            const std::string& preamble);
+            const std::string& preamble, bool legacySpirv = false);
         std::atomic<uint64_t> s_shaderCacheHits{ 0 };
 
         std::vector<uint32_t> CompileGlsl(const std::string& source, glslang_stage_t stage, std::string& log,
-            const std::string& shaderPreamble = {})
+            const std::string& shaderPreamble = {}, bool legacySpirv = false)
         {
             const std::string preamble = s_splitMemory ? "#define SPLIT_MEMORY\n" + shaderPreamble : shaderPreamble;
             if (!s_shaderCacheEnabled)
-                return CompileGlslUncached(source, stage, log, preamble);
-            std::filesystem::path file = ShaderCacheFile(source, stage, preamble);
+                return CompileGlslUncached(source, stage, log, preamble, legacySpirv);
+            std::filesystem::path file = ShaderCacheFile(source, stage, preamble, legacySpirv);
             if (FILE* f = fopen(file.c_str(), "rb"))
             {
                 std::vector<uint32_t> spirv;
@@ -1444,7 +1451,7 @@ namespace gpu::renderer
                     return spirv;
                 }
             }
-            std::vector<uint32_t> spirv = CompileGlslUncached(source, stage, log, preamble);
+            std::vector<uint32_t> spirv = CompileGlslUncached(source, stage, log, preamble, legacySpirv);
             if (!spirv.empty())
             {
                 std::error_code ec;
@@ -1466,15 +1473,15 @@ namespace gpu::renderer
         }
 
         std::vector<uint32_t> CompileGlslUncached(const std::string& source, glslang_stage_t stage, std::string& log,
-            const std::string& preamble)
+            const std::string& preamble, bool legacySpirv)
         {
             glslang_input_t input{};
             input.language = GLSLANG_SOURCE_GLSL;
             input.stage = stage;
             input.client = GLSLANG_CLIENT_VULKAN;
-            input.client_version = GLSLANG_TARGET_VULKAN_1_2;
+            input.client_version = legacySpirv ? GLSLANG_TARGET_VULKAN_1_1 : GLSLANG_TARGET_VULKAN_1_2;
             input.target_language = GLSLANG_TARGET_SPV;
-            input.target_language_version = GLSLANG_TARGET_SPV_1_5;
+            input.target_language_version = legacySpirv ? GLSLANG_TARGET_SPV_1_3 : GLSLANG_TARGET_SPV_1_5;
             input.code = source.c_str();
             input.default_version = 460;
             input.default_profile = GLSLANG_NO_PROFILE;
@@ -1499,7 +1506,19 @@ namespace gpu::renderer
             }
             else
             {
+#ifdef __ANDROID__
+                // The C API's default explicitly disables optimization. Feed
+                // Adreno SSA/simplified code instead of large register arrays,
+                // helper functions and dead stage resources. ENABLE_OPT is
+                // required by the Android dependency build.
+                glslang_spv_options_t options{};
+                options.strip_debug_info = true;
+                options.optimize_size = true;
+                options.validate = true;
+                glslang_program_SPIRV_generate_with_options(program, stage, &options);
+#else
                 glslang_program_SPIRV_generate(program, stage);
+#endif
                 spirv.resize(glslang_program_SPIRV_get_size(program));
                 glslang_program_SPIRV_get(program, spirv.data());
             }
@@ -1593,20 +1612,27 @@ namespace gpu::renderer
         // A pixel shader variant: colour outputs only for bound attachments
         // (Metal rejects others), inputs only for interpolators the vertex
         // shader writes, and the alpha test compiled in only when enabled.
-        VkShaderModule VertexModule(Shader& vs)
+        std::string VertexPreamble(uint32_t primitiveMode)
         {
+            return std::format("#define VERTEX_PRIMITIVE_MODE {}\n", primitiveMode);
+        }
+
+        VkShaderModule VertexModule(Shader& vs, uint32_t primitiveMode, bool legacySpirv = false)
+        {
+            uint32_t key = primitiveMode | (legacySpirv ? 4u : 0u);
             std::lock_guard lock(vs.compileMutex);
-            if (!vs.vertexCompiled)
-            {
-                vs.vertexCompiled = true;
-                std::string log;
-                auto spirv = CompileGlsl(vs.info.glsl, GLSLANG_STAGE_VERTEX, log);
-                if (spirv.empty())
-                    fprintf(stderr, "[renderer] vs_%016llx: GLSL compile failed:\n%s\n", (unsigned long long)vs.hash, log.c_str());
-                else
-                    vs.module = CreateModule(spirv);
-            }
-            return vs.module;
+            if (auto it = vs.vertices.find(key); it != vs.vertices.end())
+                return it->second;
+            std::string log;
+            auto spirv = CompileGlsl(vs.info.glsl, GLSLANG_STAGE_VERTEX, log, VertexPreamble(primitiveMode), legacySpirv);
+            VkShaderModule module = VK_NULL_HANDLE;
+            if (spirv.empty())
+                fprintf(stderr, "[renderer] vs_%016llx (primitive %u): GLSL compile failed:\n%s\n",
+                    (unsigned long long)vs.hash, primitiveMode, log.c_str());
+            else
+                module = CreateModule(spirv);
+            vs.vertices[key] = module;
+            return module;
         }
 
         std::string PixelPreamble(uint32_t outputs, uint32_t inputs, bool alphaTest)
@@ -1623,16 +1649,16 @@ namespace gpu::renderer
             return preamble;
         }
 
-        VkShaderModule PixelVariant(Shader& ps, uint32_t outputs, uint32_t inputs, bool alphaTest)
+        VkShaderModule PixelVariant(Shader& ps, uint32_t outputs, uint32_t inputs, bool alphaTest, bool legacySpirv = false)
         {
-            uint32_t key = (outputs & 0xF) | ((inputs & 0xFFFF) << 4) | (alphaTest ? 1u << 20 : 0);
+            uint32_t key = (outputs & 0xF) | ((inputs & 0xFFFF) << 4) | (alphaTest ? 1u << 20 : 0) | (legacySpirv ? 1u << 21 : 0);
             std::lock_guard lock(ps.compileMutex);
             auto it = ps.variants.find(key);
             if (it != ps.variants.end())
                 return it->second;
             std::string preamble = PixelPreamble(outputs, inputs, alphaTest);
             std::string log;
-            auto spirv = CompileGlsl(ps.info.glsl, GLSLANG_STAGE_FRAGMENT, log, preamble);
+            auto spirv = CompileGlsl(ps.info.glsl, GLSLANG_STAGE_FRAGMENT, log, preamble, legacySpirv);
             VkShaderModule module = VK_NULL_HANDLE;
             if (spirv.empty())
                 fprintf(stderr, "[renderer] ps_%016llx (variant %x): GLSL compile failed:\n%s\n",
@@ -2413,7 +2439,7 @@ namespace gpu::renderer
             uint32_t colorMask;      // 4 bits per target
             uint32_t depthControl;   // RB_DEPTHCONTROL (0 without a depth target, or one attached for the pass only)
             uint32_t raster;         // cull | front CW << 2 | depth clamp << 3 | depth bias << 4
-            uint32_t pad;
+            uint32_t primitiveMode;  // vertex expansion: 0 ordinary, 1 rectangle, 2 quad
 
             bool operator==(const PipelineKey& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
         };
@@ -2473,7 +2499,7 @@ namespace gpu::renderer
         // not tell us which shader or interface failed. Bound disk output to
         // 16 unique failures per process; never dump the ISO or guest memory.
         void DumpPipelineFailure(const PipelineKey& key, const Shader& vs, const Shader& ps,
-            uint32_t outputs, uint32_t inputs, VkResult result)
+            uint32_t outputs, uint32_t inputs, VkResult result, bool legacySpirv)
         {
 #ifdef __ANDROID__
             static std::mutex mutex;
@@ -2481,7 +2507,7 @@ namespace gpu::renderer
             std::lock_guard lock(mutex);
             if (dumped.size() >= 16 || !dumped.insert(key).second)
                 return;
-            auto dir = GetUserPath() / "logs" / "pipeline_failures";
+            auto dir = GetUserPath() / "logs" / "pipeline_failures" / report::SessionName();
             std::error_code ec;
             std::filesystem::create_directories(dir, ec);
             if (ec)
@@ -2502,7 +2528,7 @@ namespace gpu::renderer
                 write(std::string(suffix) + ".glsl", source.data(), source.size());
                 // CompileGlsl cached these exact modules before linking. Copy
                 // that cache entry without recompiling or retaining SPIR-V.
-                auto cache = ShaderCacheFile(sh.info.glsl, stage, preamble);
+                auto cache = ShaderCacheFile(sh.info.glsl, stage, preamble, legacySpirv);
                 if (s_shaderCacheEnabled && std::filesystem::exists(cache, ec))
                 {
                     std::filesystem::copy_file(cache, dir / (stem + suffix + ".spv"),
@@ -2510,7 +2536,7 @@ namespace gpu::renderer
                     if (ec) ok = false;
                 }
             };
-            shader(vs, GLSLANG_STAGE_VERTEX, {}, ".vert");
+            shader(vs, GLSLANG_STAGE_VERTEX, VertexPreamble(key.primitiveMode), ".vert");
             shader(ps, GLSLANG_STAGE_FRAGMENT, PixelPreamble(outputs, inputs, (key.raster >> 5) & 1), ".frag");
             auto state = std::format("result={}\nvs={:016x}\nps={:016x}\ntopology={}\nrestart={}\ncolorFormats={},{},{},{}\ndepthFormat={}\nraster={:08x}\ndepthControl={:08x}\ncolorMask={:08x}\noutputs={:x}\ninputs={:x}\nblend={:08x},{:08x},{:08x},{:08x}\n",
                 int(result), key.vs, key.ps, key.topology, key.restart,
@@ -2518,6 +2544,8 @@ namespace gpu::renderer
                 key.depthFormat, key.raster, key.depthControl, key.colorMask, outputs, inputs,
                 key.blend[0], key.blend[1], key.blend[2], key.blend[3]);
             write(".txt", state.data(), state.size());
+            auto mode = std::format("primitiveMode={}\nspirvTarget={}\n", key.primitiveMode, legacySpirv ? "1.3" : "1.5");
+            write(".mode.txt", mode.data(), mode.size());
             fprintf(stderr, "[renderer] failed-pipeline diagnostics %s: %s\n", ok ? "saved" : "incomplete", stem.c_str());
 #endif
         }
@@ -2527,7 +2555,7 @@ namespace gpu::renderer
         // locked modules and the (internally synchronized) pipeline cache.
         VkPipeline BuildPipeline(const PipelineKey& key, VkPipelineLayout layout, Shader& vs, Shader& ps)
         {
-            VkShaderModule vsModule = VertexModule(vs);
+            VkShaderModule vsModule = VertexModule(vs, key.primitiveMode);
             if (!vsModule)
                 return VK_NULL_HANDLE;
             VkPipelineShaderStageCreateInfo stages[2]{};
@@ -2644,11 +2672,36 @@ namespace gpu::renderer
             gpci.layout = layout;
             VkPipeline pipeline = VK_NULL_HANDLE;
             VkResult r = vkCreateGraphicsPipelines(s_dev, s_pipelineCache, 1, &gpci, nullptr, &pipeline);
+            bool legacySpirv = false;
+#ifdef __ANDROID__
+            if (r == VK_ERROR_UNKNOWN)
+            {
+                // A second encoding of the same shaders for driver compiler
+                // compatibility. Cache keys/modules distinguish both targets;
+                // one failed PipelineKey is still memoized, never retried on
+                // every draw. Never retry allocation/device-lost failures.
+                fprintf(stderr, "[renderer] pipeline vs %016llx ps %016llx: retrying link with optimized SPIR-V 1.3\n",
+                    (unsigned long long)key.vs, (unsigned long long)key.ps);
+                if (pipeline) vkDestroyPipeline(s_dev, pipeline, nullptr);
+                pipeline = VK_NULL_HANDLE;
+                stages[0].module = VertexModule(vs, key.primitiveMode, true);
+                stages[1].module = PixelVariant(ps, outputs, inputs, (key.raster >> 5) & 1, true);
+                if (stages[0].module && stages[1].module)
+                {
+                    legacySpirv = true;
+                    r = vkCreateGraphicsPipelines(s_dev, s_pipelineCache, 1, &gpci, nullptr, &pipeline);
+                    if (r == VK_SUCCESS)
+                        fprintf(stderr, "[renderer] pipeline vs %016llx ps %016llx recovered with SPIR-V 1.3\n",
+                            (unsigned long long)key.vs, (unsigned long long)key.ps);
+                }
+            }
+#endif
             if (r != VK_SUCCESS)
             {
                 fprintf(stderr, "[renderer] pipeline vs %016llx ps %016llx failed: %d\n",
                     (unsigned long long)key.vs, (unsigned long long)key.ps, int(r));
-                DumpPipelineFailure(key, vs, ps, outputs, inputs, r);
+                DumpPipelineFailure(key, vs, ps, outputs, inputs, r, legacySpirv);
+                if (pipeline) vkDestroyPipeline(s_dev, pipeline, nullptr);
                 pipeline = VK_NULL_HANDLE;
             }
             return pipeline;
@@ -6842,6 +6895,7 @@ void main()
         key.ps = s_ps->hash;
         key.topology = topology;
         key.restart = restart;
+        key.primitiveMode = (pc.indexInfo >> 3) & 3u;
         static const uint32_t blendRegs[4] = { XE_GPU_REG_RB_BLENDCONTROL0, XE_GPU_REG_RB_BLENDCONTROL1,
             XE_GPU_REG_RB_BLENDCONTROL2, XE_GPU_REG_RB_BLENDCONTROL3 };
         for (int i = 0; i < 4; i++)

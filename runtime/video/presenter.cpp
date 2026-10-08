@@ -2581,12 +2581,30 @@ void main()
             s_androidSurfaceStale.store(true, std::memory_order_release);
         else
 #endif
-        if (present == VK_ERROR_OUT_OF_DATE_KHR || present == VK_SUBOPTIMAL_KHR)
+        if (present == VK_ERROR_OUT_OF_DATE_KHR
+#ifndef __ANDROID__
+            || present == VK_SUBOPTIMAL_KHR
+#endif
+        )
         {
             WaitIdle();
             DestroySwapchain();
             CreateSwapchain();
         }
+#ifdef __ANDROID__
+        // Android may continuously report SUBOPTIMAL when identity differs
+        // from currentTransform. That is intentional here: the compositor
+        // rotates our window-oriented final image. Recreating an identical
+        // swapchain every frame cannot fix it and caused allocation churn.
+        // Real resizes/settings mark it stale; OUT_OF_DATE and SURFACE_LOST
+        // still use their recovery paths above.
+        if (present == VK_SUBOPTIMAL_KHR)
+        {
+            static bool logged = false;
+            if (!std::exchange(logged, true))
+                fprintf(stderr, "[video] Android suboptimal presentation accepted; keeping usable swapchain\n");
+        }
+#endif
         s_frameIndex = (s_frameIndex + 1) % FRAMES_IN_FLIGHT;
         return true;
     }
