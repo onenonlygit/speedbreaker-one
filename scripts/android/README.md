@@ -177,3 +177,15 @@ lookup, file sizes, directory enumeration, source descriptor lifetime after
 close/unlink, bounds and concurrent independent reads. It runs without game
 assets and is included in CI. The full native build and Android APK compile
 with the mounted-disc guest I/O path; on-device game startup is still unverified.
+
+## Visual diagnostic collector (0.1.5 source checkpoint)
+
+See `docs/ANDROID_VISUAL_FIDELITY.md`. A signed 0.1.5 APK has not yet been built.
+After building and installing it with `sbBringup=ON`, run locally:
+
+```sh
+scripts/android/capture_visual_fidelity.sh
+```
+
+Start Quick Race; the script waits for a new completed capture or bounded timeout
+and packages diagnostics/logcat/exit/memory reports. Never run it in cloud Work.

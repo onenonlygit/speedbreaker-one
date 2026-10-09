@@ -193,3 +193,20 @@ Checksums and native Build IDs are in builds/android/0.1.3-android-audio/
 Both APKs are preserved in the build workspace; 0.1.4 is delivered as a download.
 The authenticated source commit does not include APK binaries; shell Git push
 was unavailable because this workspace has no GitHub shell credentials.
+
+## 0.1.5 visual diagnostic source checkpoint — October 9, 2026
+
+Source investigation found D24FS8 float-versus-UNORM conversion inconsistency
+and missing fragment depth export (`writesDepth` / `o_depth` never reaches
+`gl_FragDepth`). Their usage in affected racing shaders is not established;
+no speculative lighting fix applied. Added bounded three-frame render-state
+capture using existing pass profiler, depth/guest-word/texture/front snapshots,
+draw and occlusion state, plus local-only unattended collection script.
+
+Version metadata is staged as 0.1.5 code 6, same package. **No APK built:** actual
+PPC sources/XEX and Android SDK/NDK dependencies are absent in the surviving
+workspace, and Gradle download is network-blocked. Private signing backup opens
+and matches the retained certificate. 0.1.4 artifact remains unchanged. Host
+syntax checks with compile-only compatibility fixtures, capture-budget test,
+existing ZPD tests, bash syntax and diff checks pass; Android/GPU validation is
+outstanding. Read ANDROID_VISUAL_FIDELITY.md for exact limitations and build steps.

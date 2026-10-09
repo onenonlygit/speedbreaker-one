@@ -11,6 +11,8 @@
 #include "block_ranges.h"
 #include "shader_translator.h"
 #include "zpd_report.h"
+#include "visual_capture.h"
+#include <report/zip.h>
 #include "shared_memory_glsl.h"
 #include "xenos/registers.h"
 
@@ -656,6 +658,8 @@ namespace gpu::renderer
         // print them (targets, area, draws, GPU us). 256 passes max.
         const int s_profileFrame = [] { const char* v = std::getenv("NFSMW_PASS_PROFILE"); return v ? std::atoi(v) : -1; }();
         VkQueryPool s_passQueries = VK_NULL_HANDLE;
+        visual::Capture s_visual;
+        uint64_t s_visualDepthResolves = 0;
         // Per profiled pass, also what was recorded in the gap before it:
         // resolves, texture uploads, submissions, guest memory synced to the
         // GPU copy (KB).
@@ -2106,6 +2110,58 @@ namespace gpu::renderer
             SignalWrites();
         }
 
+        void VisualImage(VkImage image, uint32_t width, uint32_t height, VkImageAspectFlags aspect,
+                         const std::string& name, bool floats)
+        {
+            const uint64_t size = uint64_t(width) * height * 4;
+            if (!s_visual.active || !image || !width || !height || size > (12ull << 20) ||
+                s_visual.bytes + size * 3 > visual::Capture::limit || s_visual.images >= 12)
+            {
+                if (s_visual.active) s_visual.text("summary.txt", name + ": skipped (image/count/budget limit)\n", true);
+                return;
+            }
+            EndPass();
+            VkDeviceSize at = RingAllocate(size);
+            if (at == ~VkDeviceSize(0))
+            {
+                s_visual.text("summary.txt", name + ": staging slot unavailable\n", true);
+                return;
+            }
+            FullBarrier();
+            VkBufferImageCopy region{};
+            region.bufferOffset = at;
+            region.imageSubresource = { aspect, 0, 0, 1 };
+            region.imageExtent = { width, height, 1 };
+            vkCmdCopyImageToBuffer(s_cmd, image, VK_IMAGE_LAYOUT_GENERAL, s_ring, 1, &region);
+            VkMemoryBarrier host{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                                 0, 1, &host, 0, nullptr, 0, nullptr);
+            Flush(); // Fence completion before reading coherent mapped staging; no deferred pointers.
+            std::vector<uint8_t> raw(s_ringHost + at, s_ringHost + at + size);
+            s_visual.write(name + (floats ? ".f32" : ".rgba8"), raw.data(), raw.size());
+            std::vector<uint8_t> rgb(size_t(width) * height * 3);
+            double minimum = 1.0, maximum = 0.0; uint64_t finite = 0;
+            for (size_t i = 0; i < size_t(width) * height; ++i)
+                if (floats)
+                {
+                    float value; memcpy(&value, raw.data() + i * 4, 4);
+                    uint8_t gray = 0;
+                    if (std::isfinite(value))
+                    { minimum = std::min(minimum, double(value)); maximum = std::max(maximum, double(value));
+                      ++finite; gray = uint8_t(std::clamp(value, 0.0f, 1.0f) * 255.0f); }
+                    rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = gray;
+                }
+                else memcpy(rgb.data() + i * 3, raw.data() + i * 4, 3);
+            auto png = report::EncodePng(rgb.data(), width, height);
+            s_visual.write(name + ".png", png.data(), png.size());
+            if (!floats && s_visual.write("final-frame.png", png.data(), png.size())) s_visual.finalFrame = s_visual.frame;
+            s_visual.text("summary.txt", std::format("{}: {}x{}, raw little-endian {}, finite {}, min {}, max {}\n",
+                name, width, height, floats ? "float32" : "RGBA8", finite, minimum, maximum), true);
+            ++s_visual.images;
+        }
+
         bool Contains(const VkRect2D& outer, const VkRect2D& inner)
         {
             return inner.offset.x >= outer.offset.x && inner.offset.y >= outer.offset.y &&
@@ -2308,16 +2364,12 @@ namespace gpu::renderer
             ri.pColorAttachments = colors;
             ri.pDepthAttachment = depth ? &ds : nullptr;
             ri.pStencilAttachment = depth ? &ds : nullptr;
-            if (s_profiling && s_passQueryNext + 2 <= 512)
+            if (s_profiling && s_passQueries && s_passQueryNext + 2 <= 512)
             {
-                char desc[256];
-                int n = snprintf(desc, sizeof(desc), "area %ux%u@%d,%d", s_passArea.extent.width, s_passArea.extent.height,
-                    s_passArea.offset.x, s_passArea.offset.y);
-                for (int i = 0; i < 4; i++)
-                    if (color[i])
-                        n += snprintf(desc + n, sizeof(desc) - n, " C%d[b%u f%u p%u]", i, color[i]->base, color[i]->format, color[i]->pitch);
-                if (depth)
-                    n += snprintf(desc + n, sizeof(desc) - n, " D[b%u p%u]", depth->base, depth->pitch);
+                std::string desc = std::format("area {}x{}@{},{}", s_passArea.extent.width, s_passArea.extent.height, s_passArea.offset.x, s_passArea.offset.y);
+                for (int i = 0; i < 4; ++i)
+                    if (color[i]) desc += std::format(" C{}[b{} f{} vk{} {}x{} p{}]", i, color[i]->base, color[i]->format, int(color[i]->vkFormat), color[i]->width, color[i]->height, color[i]->pitch);
+                if (depth) desc += std::format(" D[b{} f{} vk{} {}x{} p{}]", depth->base, depth->format, int(depth->vkFormat), depth->width, depth->height, depth->pitch);
                 vkCmdResetQueryPool(s_cmd, s_passQueries, s_passQueryNext, 2);
                 vkCmdWriteTimestamp(s_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_passQueries, s_passQueryNext);
                 GapCounters now{ s_stats.resolves, s_stats.uploads, s_stats.submits, writewatch::GetGuardStats().uploadBytes };
@@ -4016,7 +4068,7 @@ void main()
                     // (MoltenVK: 2D R32_UINT views of a cube's layers): one
                     // turned down is staged instead, below.
                     t.image = CreateImage(VK_IMAGE_TYPE_2D, fi.vk, { t.width, t.height, 1 }, layers,
-                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | (direct1x ? VK_IMAGE_USAGE_TRANSFER_DST_BIT : 0),
+                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | (s_visual.enabled() ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0) | (direct1x ? VK_IMAGE_USAGE_TRANSFER_DST_BIT : 0),
                         cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT,
                         VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT | (cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0),
                         1, &list, &sampled, cube);
@@ -4075,7 +4127,7 @@ void main()
                 }
                 if (!t.image.image)
                     t.image = CreateImage(volume ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, fi.vk, { t.width, t.height, depth }, layers,
-                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (s_visual.enabled() ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0),
                         cube ? VK_IMAGE_VIEW_TYPE_CUBE : volume ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT,
                         cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0, t.levels);
             }
@@ -4898,6 +4950,7 @@ void main()
                 return;
 
             bool depthSource = copyControl.copy_src_select >= 4;
+            if (depthSource) ++s_visualDepthResolves;
             // NFSMW_LOG_RESOLVES=1: describe the first resolves in detail.
             // NFSMW_LOG_RESOLVES_PITCH=<p>: only resolves from surfaces of that pitch.
             static const bool logResolves = std::getenv("NFSMW_LOG_RESOLVES") != nullptr;
@@ -5287,6 +5340,37 @@ void main()
                     }
                     GuardGpu(rangeBase, rangeBytes, true, "resolve");
                     writewatch::MarkGpuOwned(rangeBase, rangeBytes);
+                }
+            }
+
+            if (s_visual.active && depthSource && copy && s_visual.images < 4)
+            {
+                s_visual.depthDestinations.insert(destBase & 0x1FFFFFFFu);
+                auto name = std::format("depth-targets/frame-{}-resolve-{}", s_visual.frame, s_visual.images);
+                s_visual.text("summary.txt", std::format("{}: EDRAM base {}, pitch {}, guest format {}, Vulkan format {}, dest {:08x}, dest format {}, rect {},{}..{},{}\n",
+                    name, source->base, source->pitch, source->format, int(source->vkFormat), destBase, format, r.x0, r.y0, r.x1, r.y1), true);
+                VisualImage(source->image.image, source->width, source->height, VK_IMAGE_ASPECT_DEPTH_BIT, name, true);
+                // Raw resolved guest words after the compute resolve, before guest ownership changes.
+                if (source->width * uint64_t(source->height) * 4 <= (12ull << 20))
+                {
+                    auto [offset, endOffset] = ResolveExtent(r, (destPitch.copy_dest_pitch + 31) & ~31u, ResolveBppLog2(format));
+                    uint32_t bytes = endOffset - offset;
+                    uint64_t base = (destBase & 0x1FFFFFFFu) + uint64_t(offset);
+                    if (bytes && bytes <= (12u << 20) && base + bytes <= kSharedSize && s_visual.bytes + bytes < visual::Capture::limit)
+                    {
+                        EndPass(); VkDeviceSize at = RingAllocate(bytes);
+                        if (at != ~VkDeviceSize(0))
+                        {
+                            FullBarrier(); VkBufferCopy copyRegion{ base, at, bytes };
+                            vkCmdCopyBuffer(s_cmd, s_shared, s_ring, 1, &copyRegion);
+                            VkMemoryBarrier host{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+                            host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+                            vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host, 0, nullptr, 0, nullptr);
+                            Flush();
+                            s_visual.write(name + ".guest-tiled.bin", s_ringHost + at, bytes);
+                            s_visual.text("summary.txt", std::format("{} guest bytes: base {:08x}, size {}, endian {}, tiled pitch {}\n", name, base, bytes, uint32_t(destInfo.copy_dest_endian), uint32_t(destPitch.copy_dest_pitch)), true);
+                        }
+                    }
                 }
             }
 
@@ -6427,10 +6511,15 @@ void main()
                     fprintf(stderr, "[renderer] submission GPU timestamps unavailable\n");
                 }
             }
-            if (s_profileFrame >= 0)
+            if (s_profileFrame >= 0 || s_visual.enabled())
             {
+                uint32_t count = 0; vkGetPhysicalDeviceQueueFamilyProperties(s_vk->physical, &count, nullptr);
+                std::vector<VkQueueFamilyProperties> families(count);
+                vkGetPhysicalDeviceQueueFamilyProperties(s_vk->physical, &count, families.data());
                 qpci.queryCount = 512;
-                Check(vkCreateQueryPool(s_dev, &qpci, nullptr, &s_passQueries), "pass query pool");
+                if (s_vk->queueFamily >= count || !families[s_vk->queueFamily].timestampValidBits ||
+                    vkCreateQueryPool(s_dev, &qpci, nullptr, &s_passQueries) != VK_SUCCESS)
+                { s_passQueries = VK_NULL_HANDLE; fprintf(stderr, "[visual] per-pass timestamps unavailable\n"); }
             }
         }
         // NFSMW_OCCLUSION=1: a pool of occlusion queries per slot, so a reset
@@ -7659,6 +7748,41 @@ void main()
                 }
             }
         }
+        if (s_visual.active && s_visual.draws++ < 6000)
+        {
+            auto finiteValue = [](float value) { return std::isfinite(value) ? value : 0.0f; };
+            std::string line = std::format("{{\"frame\":{},\"draw\":{},\"vs\":\"{:016x}\",\"ps\":\"{:016x}\",\"target\":[{},{}],\"viewport_transform\":[{},{},{},{},{},{}],\"scissor\":[{},{},{},{}],\"depth_control\":{},\"blend\":[{},{},{},{}],\"color_mask\":{},\"clip\":{},\"fetch\":[",
+                s_visual.frame, s_visual.draws, s_vs->hash, s_ps->hash, targetW, targetH,
+                finiteValue(sx), finiteValue(sy), finiteValue(sz), finiteValue(ox), finiteValue(oy), finiteValue(oz), x0, y0, x1, y1, s_regs[XE_GPU_REG_RB_DEPTHCONTROL],
+                s_regs[XE_GPU_REG_RB_BLENDCONTROL0], s_regs[XE_GPU_REG_RB_BLENDCONTROL1], s_regs[XE_GPU_REG_RB_BLENDCONTROL2], s_regs[XE_GPU_REG_RB_BLENDCONTROL3],
+                s_regs[XE_GPU_REG_RB_COLOR_MASK], s_regs[XE_GPU_REG_PA_CL_CLIP_CNTL]);
+            bool comma = false;
+            for (uint32_t n = 0; n < 32; ++n)
+                if ((s_ps->info.texture2DMask | s_ps->info.texture3DMask | s_ps->info.textureCubeMask) & (1u << n))
+                {
+                    const uint32_t* f = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6];
+                    if (comma) line += ","; comma = true;
+                    line += std::format("{{\"slot\":{},\"words\":[{},{},{},{},{},{}]}}", n, f[0], f[1], f[2], f[3], f[4], f[5]);
+                    s_visual.sampled.insert(f[1] & 0x1FFFF000u);
+                }
+            line += std::format("],\"pixel_writes_depth\":{},\"constants\":[", s_ps->info.writesDepth ? "true" : "false");
+            comma = false;
+            for (unsigned stage = 0; stage < 2; ++stage)
+            {
+                const auto& info = stage ? s_ps->info : s_vs->info;
+                unsigned recorded = 0;
+                for (unsigned index = 0; index < 256 && recorded < 32; ++index)
+                    if (info.constRelative || (info.constUsed[index / 64] & (1ull << (index % 64))))
+                    {
+                        const uint32_t* c = &s_regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (stage * 256 + index) * 4];
+                        if (comma) line += ","; comma = true;
+                        line += std::format("{{\"stage\":{},\"index\":{},\"bits\":[{},{},{},{}]}}", stage, index, c[0], c[1], c[2], c[3]);
+                        ++recorded;
+                    }
+            }
+            line += "],\"constant_limit_per_stage\":32}\n";
+            s_visual.text("draw-state.jsonl", line, true);
+        }
         // NFSMW_LOG_DRAWS=<seconds>: every draw of one frame (target, viewport,
         // scissor, textures, shaders), consecutive duplicates folded.
         if (s_logDrawsNow)
@@ -8163,6 +8287,13 @@ void main()
             previousSwap = thisSwap;
         }
 
+        if (s_visual.active)
+        {
+            VisualImage(front.image, outW, outH, VK_IMAGE_ASPECT_COLOR_BIT,
+                        std::format("frame-{}-final", s_visual.frame), false);
+            LogOcclusionCounts(s_visual.directory.string().c_str());
+        }
+
         // NFSMW_CHECK_FRONT=<n>: at the n-th GPU present, read the image back
         // into build/front_check.ppm (verifies this path without a screen).
         // NFSMW_CHECK_FRONT_SEC=<s>: from s seconds after launch, 6 captures
@@ -8358,9 +8489,14 @@ void main()
             s_logDrawsNow = true;
             fprintf(stderr, "[draws] frame %llu\n", (unsigned long long)frame);
         }
-        if (!s_vk || s_profileFrame < 0)
-            return;
-        if (frame == uint64_t(s_profileFrame))
+        static uint64_t visualLastDraws = 0, visualLastPasses = 0;
+        uint64_t frameDraws = s_stats.draws - visualLastDraws, framePasses = s_stats.passes - visualLastPasses;
+        visualLastDraws = s_stats.draws; visualLastPasses = s_stats.passes;
+        uint64_t depthResolves = s_visualDepthResolves; s_visualDepthResolves = 0;
+        bool visualEnded = s_visual.active;
+        if (!s_vk) return;
+        bool armVisual = !visualEnded && s_visual.arm(frame + 1, frameDraws, framePasses, depthResolves, GetUserPath() / "diagnostics");
+        if (armVisual || (s_profileFrame >= 0 && frame == uint64_t(s_profileFrame)))
         {
             s_profiling = true;
             s_passInfos.clear();
@@ -8381,9 +8517,12 @@ void main()
         for (const PassInfo& pi : s_passInfos)
         {
             uint64_t ts[2] = {};
-            vkGetQueryPoolResults(s_dev, s_passQueries, pi.query, 2, sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+            VkResult timestampStatus = vkGetQueryPoolResults(s_dev, s_passQueries, pi.query, 2, sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+            if (timestampStatus != VK_SUCCESS) ts[0] = ts[1] = 0;
             double us = ts[1] > ts[0] ? double(ts[1] - ts[0]) * s_timestampPeriod / 1000.0 : 0.0;
             double gap = lastEnd && ts[0] > lastEnd ? double(ts[0] - lastEnd) * s_timestampPeriod / 1000.0 : 0.0;
+            if (s_visual.active)
+                s_visual.text("render-passes.csv", std::format("{},{},{},{},{},{},{},{},{},{},\"{}\"\n", s_visual.frame, pi.query / 2, us, gap, int(timestampStatus), pi.draws, pi.resolves, pi.uploads, pi.submits, pi.shadowKB, pi.desc), true);
             total += us;
             between += gap;
             if (ts[1] > ts[0])
@@ -8392,6 +8531,31 @@ void main()
                 us, pi.draws, gap, pi.resolves, pi.uploads, pi.submits, (unsigned long long)pi.shadowKB, pi.desc.c_str());
         }
         fprintf(stderr, "[profile] total %.1f us in passes, %.1f us between them\n", total, between);
+        if (visualEnded)
+        {
+            {
+                std::lock_guard lock(s_zpdLatestMutex);
+                s_visual.text("draw-state.jsonl", std::format("{{\"frame\":{},\"occlusion_counting\":{},\"reports\":[", s_visual.frame, s_zpdOn ? "true" : "false"), true);
+                bool comma = false;
+                for (const auto& [address, result] : s_zpdLatest)
+                {
+                    if (comma) s_visual.text("draw-state.jsonl", ",", true); comma = true;
+                    s_visual.text("draw-state.jsonl", std::format("{{\"address\":{},\"count\":{},\"frame\":{}}}", address, result.first, result.second), true);
+                }
+                s_visual.text("draw-state.jsonl", "]}\n", true);
+            }
+            for (const auto& [key, ptr] : s_textures)
+            {
+                const Texture& t = *ptr;
+                if (t.uploaded && t.format == VK_FORMAT_R32_SFLOAT && !t.cube && !t.volume &&
+                    s_visual.depthDestinations.contains(t.guestStart) && s_visual.sampled.contains(t.guestStart))
+                    VisualImage(t.image.image, t.width, t.height, VK_IMAGE_ASPECT_COLOR_BIT,
+                        std::format("resolved-textures/frame-{}-{:08x}", s_visual.frame, t.guestStart), true);
+            }
+            s_visual.text("summary.txt", std::format("frame {}: {} passes; depth comparison is shader arithmetic (Vulkan sampler compare disabled); pipeline skips {}. Sampled texture snapshots are end-of-frame representations.\n", s_visual.frame, s_passInfos.size(), s_stats.pipelineSkips), true);
+            if (!s_passQueries) s_visual.text("summary.txt", "GPU timestamps unavailable; no pass rows captured.\n", true);
+            s_visual.finish();
+        }
     }
 
     std::vector<uint32_t> CompileShader(const std::string& glsl, int stage, std::string& log)
