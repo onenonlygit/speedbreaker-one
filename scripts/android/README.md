@@ -178,9 +178,9 @@ close/unlink, bounds and concurrent independent reads. It runs without game
 assets and is included in CI. The full native build and Android APK compile
 with the mounted-disc guest I/O path; on-device game startup is still unverified.
 
-## Visual diagnostic collector (0.1.5 source checkpoint)
+## Visual diagnostic collector (0.1.5 signed build)
 
-See `docs/ANDROID_VISUAL_FIDELITY.md`. A signed 0.1.5 APK has not yet been built.
+See `docs/ANDROID_VISUAL_FIDELITY.md`. The optimized ARM64 0.1.5 APK is signed with the retained install-over certificate.
 After building and installing it with `sbBringup=ON`, run locally:
 
 ```sh

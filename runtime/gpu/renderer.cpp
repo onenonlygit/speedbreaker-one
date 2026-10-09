@@ -2104,7 +2104,7 @@ namespace gpu::renderer
             ZpdEndSegment();  // a segment never outlives its pass
             s_vk->cmdEndRendering(s_cmd);
             s_passActive = false;
-            if (s_profiling && !s_passInfos.empty() && s_passInfos.back().query + 1 < s_passQueryNext)
+            if (s_profiling && s_passQueries && !s_passInfos.empty() && s_passInfos.back().query + 1 < s_passQueryNext)
                 vkCmdWriteTimestamp(s_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_passQueries, s_passInfos.back().query + 1);
             PassEndBarrier();
             SignalWrites();
@@ -2364,14 +2364,17 @@ namespace gpu::renderer
             ri.pColorAttachments = colors;
             ri.pDepthAttachment = depth ? &ds : nullptr;
             ri.pStencilAttachment = depth ? &ds : nullptr;
-            if (s_profiling && s_passQueries && s_passQueryNext + 2 <= 512)
+            if (s_profiling && s_passQueryNext + 2 <= 512)
             {
                 std::string desc = std::format("area {}x{}@{},{}", s_passArea.extent.width, s_passArea.extent.height, s_passArea.offset.x, s_passArea.offset.y);
                 for (int i = 0; i < 4; ++i)
                     if (color[i]) desc += std::format(" C{}[b{} f{} vk{} {}x{} p{}]", i, color[i]->base, color[i]->format, int(color[i]->vkFormat), color[i]->width, color[i]->height, color[i]->pitch);
                 if (depth) desc += std::format(" D[b{} f{} vk{} {}x{} p{}]", depth->base, depth->format, int(depth->vkFormat), depth->width, depth->height, depth->pitch);
-                vkCmdResetQueryPool(s_cmd, s_passQueries, s_passQueryNext, 2);
-                vkCmdWriteTimestamp(s_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_passQueries, s_passQueryNext);
+                if (s_passQueries)
+                {
+                    vkCmdResetQueryPool(s_cmd, s_passQueries, s_passQueryNext, 2);
+                    vkCmdWriteTimestamp(s_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_passQueries, s_passQueryNext);
+                }
                 GapCounters now{ s_stats.resolves, s_stats.uploads, s_stats.submits, writewatch::GetGuardStats().uploadBytes };
                 s_passInfos.push_back({ desc, 0, s_slot, s_passQueryNext, uint32_t(now.resolves - s_gapLast.resolves),
                     uint32_t(now.uploads - s_gapLast.uploads), uint32_t(now.submits - s_gapLast.submits), (now.shadowBytes - s_gapLast.shadowBytes) / 1024 });
@@ -3529,7 +3532,8 @@ void main()
             {
                 VkImageFormatProperties props;
                 it->second = vkGetPhysicalDeviceImageFormatProperties(s_vk->physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
-                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                    (s_visual.enabled() && format == VK_FORMAT_R32_SFLOAT && !cube ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0),
                     VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT | (cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0),
                     &props) == VK_SUCCESS && (!cube || props.maxArrayLayers >= 6);
             }
@@ -4068,7 +4072,7 @@ void main()
                     // (MoltenVK: 2D R32_UINT views of a cube's layers): one
                     // turned down is staged instead, below.
                     t.image = CreateImage(VK_IMAGE_TYPE_2D, fi.vk, { t.width, t.height, 1 }, layers,
-                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | (s_visual.enabled() ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0) | (direct1x ? VK_IMAGE_USAGE_TRANSFER_DST_BIT : 0),
+                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | (s_visual.enabled() && fi.vk == VK_FORMAT_R32_SFLOAT && !cube ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0) | (direct1x ? VK_IMAGE_USAGE_TRANSFER_DST_BIT : 0),
                         cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT,
                         VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT | (cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0),
                         1, &list, &sampled, cube);
@@ -4127,7 +4131,7 @@ void main()
                 }
                 if (!t.image.image)
                     t.image = CreateImage(volume ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, fi.vk, { t.width, t.height, depth }, layers,
-                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (s_visual.enabled() ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0),
+                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (s_visual.enabled() && fi.vk == VK_FORMAT_R32_SFLOAT && !cube && !volume ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0),
                         cube ? VK_IMAGE_VIEW_TYPE_CUBE : volume ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT,
                         cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0, t.levels);
             }
@@ -4950,7 +4954,6 @@ void main()
                 return;
 
             bool depthSource = copyControl.copy_src_select >= 4;
-            if (depthSource) ++s_visualDepthResolves;
             // NFSMW_LOG_RESOLVES=1: describe the first resolves in detail.
             // NFSMW_LOG_RESOLVES_PITCH=<p>: only resolves from surfaces of that pitch.
             static const bool logResolves = std::getenv("NFSMW_LOG_RESOLVES") != nullptr;
@@ -5002,6 +5005,7 @@ void main()
                 : uint32_t(destInfo.copy_dest_format);
             bool copy = copyControl.copy_command == xenos::CopyCommand::kRaw ||
                 copyControl.copy_command == xenos::CopyCommand::kConvert;
+            if (depthSource && copy && destBase != 0) ++s_visualDepthResolves;
             if (copy && destBase != 0)
             {
                 auto [extentStart, extentEnd] = ResolveExtent(r, (destPitch.copy_dest_pitch + 31) & ~31u, ResolveBppLog2(format));
@@ -5343,7 +5347,7 @@ void main()
                 }
             }
 
-            if (s_visual.active && depthSource && copy && s_visual.images < 4)
+            if (s_visual.active && depthSource && copy && destBase != 0 && s_visual.resolveIndex++ == s_visual.selectedResolve)
             {
                 s_visual.depthDestinations.insert(destBase & 0x1FFFFFFFu);
                 auto name = std::format("depth-targets/frame-{}-resolve-{}", s_visual.frame, s_visual.images);
@@ -8513,11 +8517,11 @@ void main()
         // where a submission waited).
         double total = 0, between = 0;
         uint64_t lastEnd = 0;
-        fprintf(stderr, "[profile] frame %d: %zu passes\n", s_profileFrame, s_passInfos.size());
+        fprintf(stderr, "[profile] frame %lld: %zu passes\n", s_visual.active ? (long long)s_visual.frame : (long long)s_profileFrame, s_passInfos.size());
         for (const PassInfo& pi : s_passInfos)
         {
             uint64_t ts[2] = {};
-            VkResult timestampStatus = vkGetQueryPoolResults(s_dev, s_passQueries, pi.query, 2, sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+            VkResult timestampStatus = s_passQueries ? vkGetQueryPoolResults(s_dev, s_passQueries, pi.query, 2, sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) : VK_ERROR_FEATURE_NOT_PRESENT;
             if (timestampStatus != VK_SUCCESS) ts[0] = ts[1] = 0;
             double us = ts[1] > ts[0] ? double(ts[1] - ts[0]) * s_timestampPeriod / 1000.0 : 0.0;
             double gap = lastEnd && ts[0] > lastEnd ? double(ts[0] - lastEnd) * s_timestampPeriod / 1000.0 : 0.0;
@@ -8533,27 +8537,34 @@ void main()
         fprintf(stderr, "[profile] total %.1f us in passes, %.1f us between them\n", total, between);
         if (visualEnded)
         {
+            std::string occlusionLine = std::format("{{\"frame\":{},\"occlusion_counting\":{},\"reports\":[", s_visual.frame, s_zpdOn ? "true" : "false");
             {
                 std::lock_guard lock(s_zpdLatestMutex);
-                s_visual.text("draw-state.jsonl", std::format("{{\"frame\":{},\"occlusion_counting\":{},\"reports\":[", s_visual.frame, s_zpdOn ? "true" : "false"), true);
-                bool comma = false;
+                unsigned records = 0;
                 for (const auto& [address, result] : s_zpdLatest)
                 {
-                    if (comma) s_visual.text("draw-state.jsonl", ",", true); comma = true;
-                    s_visual.text("draw-state.jsonl", std::format("{{\"address\":{},\"count\":{},\"frame\":{}}}", address, result.first, result.second), true);
+                    if (records == 256) break;
+                    if (records++) occlusionLine += ",";
+                    occlusionLine += std::format("{{\"address\":{},\"count\":{},\"frame\":{}}}", address, result.first, result.second);
                 }
-                s_visual.text("draw-state.jsonl", "]}\n", true);
+                occlusionLine += std::format("],\"reports_truncated\":{}}}\n", s_zpdLatest.size() > records ? "true" : "false");
             }
+            s_visual.text("draw-state.jsonl", occlusionLine, true);
+            bool sampledImageCaptured = false;
             for (const auto& [key, ptr] : s_textures)
             {
                 const Texture& t = *ptr;
-                if (t.uploaded && t.format == VK_FORMAT_R32_SFLOAT && !t.cube && !t.volume &&
+                if (!sampledImageCaptured && t.uploaded && t.format == VK_FORMAT_R32_SFLOAT && !t.cube && !t.volume &&
                     s_visual.depthDestinations.contains(t.guestStart) && s_visual.sampled.contains(t.guestStart))
+                {
+                    sampledImageCaptured = true;
                     VisualImage(t.image.image, t.width, t.height, VK_IMAGE_ASPECT_COLOR_BIT,
                         std::format("resolved-textures/frame-{}-{:08x}", s_visual.frame, t.guestStart), true);
+                }
             }
+            if (!sampledImageCaptured) s_visual.text("summary.txt", "No exact-base sampled R32F representation matched selected depth resolve this frame.\n", true);
             s_visual.text("summary.txt", std::format("frame {}: {} passes; depth comparison is shader arithmetic (Vulkan sampler compare disabled); pipeline skips {}. Sampled texture snapshots are end-of-frame representations.\n", s_visual.frame, s_passInfos.size(), s_stats.pipelineSkips), true);
-            if (!s_passQueries) s_visual.text("summary.txt", "GPU timestamps unavailable; no pass rows captured.\n", true);
+            if (!s_passQueries) s_visual.text("summary.txt", "GPU timestamps unavailable; pass metadata retained with unavailable status.\n", true);
             s_visual.finish();
         }
     }

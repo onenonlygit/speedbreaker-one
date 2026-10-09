@@ -1,0 +1,33 @@
+{
+  "version_name": "0.1.5-android-visual-diagnostic",
+  "version_code": 6,
+  "package": "com.onenonlygit.speedbreakerone",
+  "abi": "arm64-v8a",
+  "size_bytes": 20790579,
+  "apk_sha256": "1d0948eb2e745e410139513e0a0700788b6330888784e854190199fe760ed490",
+  "signing_certificate_sha256": "29ebbb37c610217ff00755e3731df6a1db46eda4cec45555157704ab545902bf",
+  "apk_signature_scheme": "v2",
+  "native_build_id": "d749b95f479de813e81d7274c7af60a67f3915ac",
+  "unique_translated_guest_functions": 56165,
+  "build_type": "RelWithDebInfo",
+  "sbDiagnostics": "OFF",
+  "sbBringup": "ON",
+  "debuggable": true,
+  "source_base_commit": "1317054f50ce2fde634bc66f59181a8ea48d188c",
+  "embedded_native_source_dirty": true,
+  "embedded_native_version": "0.1.0",
+  "source_changes": "Committed with this build checkpoint; renderer source/header predate compiled object.",
+  "ndk": "28.2.13676358",
+  "sdk": 35,
+  "gradle": "8.12",
+  "java": "17.0.20",
+  "sdl": "3.2.24",
+  "glslang": "15.1.0",
+  "ffmpeg": "7.1.1",
+  "device_tested": false,
+  "limitations": [
+    "3D gameplay is detected through sustained draw/pass/depth-resolve state, not a verified guest Quick Race flag.",
+    "Selected capture frames stall for readback; timings are diagnostic.",
+    "No lighting fix or Xbox 360 visual parity claimed."
+  ]
+}

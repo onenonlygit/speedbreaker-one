@@ -19,7 +19,7 @@ LOG_PID=$!
 cleanup() { kill "$LOG_PID" 2>/dev/null || true; wait "$LOG_PID" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 # Capture old directory list so an earlier completed session cannot satisfy this run.
-list_sessions() { "${ADB[@]}" exec-out run-as "$PACKAGE" sh -c 'for d in files/data/speedbreaker/diagnostics/visual-*; do [ -d "$d" ] && echo "$d"; done' | tr -d '\r' || true; }
+list_sessions() { "${ADB[@]}" exec-out "run-as $PACKAGE sh -c 'for d in files/data/speedbreaker/diagnostics/visual-*; do [ -d \"\$d\" ] && echo \"\$d\"; done'" | tr -d '\r' || true; }
 list_sessions > "$OUT/sessions-before.txt"
 "${ADB[@]}" shell am start -n "$PACKAGE/.SpeedBreakerActivity" > "$OUT/launch.txt"
 echo 'Start Quick Race and drive briefly. Collecting automatically (up to '"$TIMEOUT"' seconds).'

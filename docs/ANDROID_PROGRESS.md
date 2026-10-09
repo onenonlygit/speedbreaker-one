@@ -210,3 +210,22 @@ and matches the retained certificate. 0.1.4 artifact remains unchanged. Host
 syntax checks with compile-only compatibility fixtures, capture-budget test,
 existing ZPD tests, bash syntax and diff checks pass; Android/GPU validation is
 outstanding. Read ANDROID_VISUAL_FIDELITY.md for exact limitations and build steps.
+
+## 0.1.5 signed APK completed — October 9, 2026
+
+The supplied supported USA XEX regenerated actual PPC code. Recovered SDK/NDK,
+JDK, Gradle and pinned dependencies; proxy bootstrap resolves dynamically from
+the environment. Patched FFmpeg extraction to avoid archive ownership changes.
+Full optimized ARM64 release passed (sbDiagnostics=OFF, sbBringup=ON). APK v2
+certificate matches the retained signing identity; same package, code 6.
+56,165 unique translated functions and new capture code verified in libmain.so.
+Build ID d749b95f479de813e81d7274c7af60a67f3915ac. APK SHA256
+1d0948eb2e745e410139513e0a0700788b6330888784e854190199fe760ed490.
+
+Capture now rotates one depth resolve across three selected frames, records
+matching end-of-frame sampled R32F data, preserves pass metadata if timestamps
+are unavailable, and reports budget-limited output. Fixed collector remote-shell
+quoting. Capture-limit, actual shader translator, eight optimized/validated
+SPIR-V modules, ZPD, ISO reader, PNG/ZIP and syntax checks pass. These supersede
+the previous build blocker. No RP6/ADB/LAN access or visual fix performed.
+0.1.4 is preserved. Metadata is under builds/android/0.1.5-android-visual-diagnostic/.
