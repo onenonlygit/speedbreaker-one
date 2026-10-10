@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(SpeedBreakerAndroid VERSION 0.1.0 LANGUAGES C CXX)
+project(SpeedBreakerAndroid VERSION 0.1.6 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(SB_ANDROID_COMPILE_CHECK "Compile runtime objects without game-derived code (never link/package)" OFF)

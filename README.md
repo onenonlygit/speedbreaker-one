@@ -7,14 +7,18 @@ Original authors retain credit for SpeedBreaker's recompilation, runtime,
 renderer, UI and artwork. The original banners and screenshots below are retained;
 they illustrate upstream SpeedBreaker and are not Android performance claims.
 
-**Current milestone (October 8, 2026):** one complete Quick Race sprint on a
-Retroid Pocket 6. Roads/world geometry, cars and HUD now render; music and some
-effects play. Engine audio remains missing, performance is roughly 21–30 FPS
-in sampled racing logs at internal 720p, and repeated-race stability is unverified.
+**Current Android release:** 0.1.6 (code 7), upstream v0.1.1 shadow-depth
+packing fix with retained 0.1.5 diagnostics. Build validation and Adreno testing
+are separate; racing performance remains user-reported ~21–39 FPS at 720p,
+and most audio now works according to the 0.1.3 follow-up. RP6 validation of
+0.1.6 and post-fix shadow flicker remain outstanding.
 
-- [Download the tested 0.1.2 Android race APK](https://github.com/onenonlygit/speedbreaker-one/releases/download/android-v0.1.2-race/SpeedBreaker-One-arm64-race.apk)
-- [APK status, installation, checksum and metadata](https://github.com/onenonlygit/speedbreaker-one/tree/android/rp6-bringup/builds/android/0.1.2-android-race)
-- [Progress and continuation checkpoint](https://github.com/onenonlygit/speedbreaker-one/blob/android/rp6-bringup/docs/ANDROID_PROGRESS.md)
+- [Android releases](https://github.com/onenonlygit/speedbreaker-one/releases)
+- [Mandatory engineering methodology](docs/ENGINEERING_METHODOLOGY.md)
+- [Android performance roadmap](docs/ANDROID_PERFORMANCE_ROADMAP.md)
+- [Selective upstream review and shadow-flicker hypotheses](docs/ANDROID_UPSTREAM_016.md)
+- [Progress and continuation checkpoint](docs/ANDROID_PROGRESS.md)
+- [0.1.5 visual diagnostics](docs/ANDROID_VISUAL_FIDELITY.md)
 - [Active Android source branch](https://github.com/onenonlygit/speedbreaker-one/tree/android/rp6-bringup)
 
 The Android build reads the selected ISO directly through Android's file picker;
