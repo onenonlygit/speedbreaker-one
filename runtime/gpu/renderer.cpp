@@ -13,6 +13,7 @@
 #include "zpd_report.h"
 #include "visual_capture.h"
 #include <report/zip.h>
+#include "depth24_glsl.h"
 #include "shared_memory_glsl.h"
 #include "xenos/registers.h"
 
@@ -4605,14 +4606,14 @@ vec4 px(uint x, uint y)
 }
 
 uint unorm(float v, float m) { return uint(clamp(v, 0.0, 1.0) * m + 0.5); }
-
+)" GLSL_DEPTH24_PACK R"(
 uint pack32(vec4 c)
 {
     switch (p.format)
     {
     case 6u: case 14u: return packUnorm4x8(c);
     case 7u: return unorm(c.r, 1023.0) | (unorm(c.g, 1023.0) << 10) | (unorm(c.b, 1023.0) << 20) | (unorm(c.a, 3.0) << 30);
-    case 22u: case 23u: return unorm(c.r, 16777215.0) << 8;
+    case 22u: case 23u: return packDepth24(c.r) << 8;  // Clamp before shifting: far-plane 1.0 must not wrap to zero.
     case 25u: return packSnorm2x16(c.rg);
     case 31u: return packHalf2x16(c.rg);
     case 33u: case 36u: return floatBitsToUint(c.r);

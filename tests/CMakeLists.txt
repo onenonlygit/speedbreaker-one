@@ -49,3 +49,7 @@ sb_test(shader_variants_test SOURCES ${RT}/gpu/shader_translator.cpp ${RT}/gpu/x
 # Pinned SDL from the runtime target: dummy-device routing, no game required.
 sb_test(audio_downmix_test)
 target_link_libraries(audio_downmix_test PRIVATE SDL3::SDL3)
+
+# Upstream v0.1.1 regression: shared GLSL/C++ arithmetic plus actual resolve integration.
+sb_test(depth24_pack_test ARGS ${RT}/gpu/renderer.cpp)
+sb_test(visual_capture_test ARGS ${CMAKE_CURRENT_BINARY_DIR}/visual_capture_out)
