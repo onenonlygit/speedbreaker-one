@@ -25,7 +25,8 @@ jobs:
             exit 1
           fi
           cat signature.txt
-          grep -F 'Signer #1 certificate SHA-256 digest: 29ebbb37c610217ff00755e3731df6a1db46eda4cec45555157704ab545902bf' signature.txt
+          grep -Fx 'Number of signers: 1' signature.txt
+          grep -F 'certificate SHA-256 digest: 29ebbb37c610217ff00755e3731df6a1db46eda4cec45555157704ab545902bf' signature.txt
       - name: Publish experimental prerelease (Adreno validation pending)
         env:
           GH_TOKEN: ${{ github.token }}
