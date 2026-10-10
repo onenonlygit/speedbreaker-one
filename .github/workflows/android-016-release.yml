@@ -20,7 +20,11 @@ jobs:
           sha256sum -c SHA256SUMS
           signer="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
           test -n "$signer"
-          "$signer" verify --verbose --print-certs SpeedBreaker-One-arm64-0.1.6.apk > signature.txt
+          if ! "$signer" verify --verbose --print-certs SpeedBreaker-One-arm64-0.1.6.apk > signature.txt 2>&1; then
+            cat signature.txt
+            exit 1
+          fi
+          cat signature.txt
           grep -F 'Signer #1 certificate SHA-256 digest: 29ebbb37c610217ff00755e3731df6a1db46eda4cec45555157704ab545902bf' signature.txt
       - name: Publish experimental prerelease (Adreno validation pending)
         env:
