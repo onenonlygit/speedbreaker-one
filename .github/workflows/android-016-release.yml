@@ -1,0 +1,41 @@
+name: Publish signed Android 0.1.6 lighting checkpoint
+on:
+  push:
+    branches: [android/rp6-bringup]
+    paths:
+      - 'builds/android/0.1.6-android-lighting/**'
+      - '.github/workflows/android-016-release.yml'
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Assemble and verify exact signed APK (no game inputs or rebuild)
+        working-directory: builds/android/0.1.6-android-lighting
+        run: |
+          set -euo pipefail
+          cat SpeedBreaker-One-arm64-0.1.6.apk.part-* > SpeedBreaker-One-arm64-0.1.6.apk
+          sha256sum -c SHA256SUMS
+          signer="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$signer"
+          "$signer" verify --verbose --print-certs SpeedBreaker-One-arm64-0.1.6.apk > signature.txt
+          grep -F 'Signer #1 certificate SHA-256 digest: 29ebbb37c610217ff00755e3731df6a1db46eda4cec45555157704ab545902bf' signature.txt
+      - name: Publish experimental prerelease (Adreno validation pending)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag=android-v0.1.6-lighting
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --target "$GITHUB_SHA" --prerelease \
+              --title 'Android 0.1.6 — upstream lighting fix (RP6 validation pending)' \
+              --notes-file builds/android/0.1.6-android-lighting/README.md
+          fi
+          gh release upload "$tag" \
+            builds/android/0.1.6-android-lighting/SpeedBreaker-One-arm64-0.1.6.apk \
+            builds/android/0.1.6-android-lighting/TEST-INSTRUCTIONS.txt \
+            builds/android/0.1.6-android-lighting/SHA256SUMS \
+            builds/android/0.1.6-android-lighting/build.json --clobber

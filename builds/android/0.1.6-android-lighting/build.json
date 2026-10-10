@@ -1,0 +1,21 @@
+{
+  "version_name": "0.1.6",
+  "version_code": 7,
+  "package": "com.onenonlygit.speedbreakerone",
+  "abi": "arm64-v8a",
+  "source_commit": "2efca3bb94dc6cc1d39d6366b675a49edf610254",
+  "source_dirty": false,
+  "upstream_reference": "05838d6b8b0c005ed266db1f6d4af23e5dd555fe",
+  "apk": "SpeedBreaker-One-arm64-0.1.6.apk",
+  "apk_sha256": "d8a4b30c1340f3e1091cfdc3594aba309b53341c1544e7e32a627e13793d918c",
+  "apk_size_bytes": 20784759,
+  "libmain_build_id": "1b1c1a2d32394a1eb88f39f5d229b06cfa17b57d",
+  "translated_function_count": 56165,
+  "certificate_sha256": "29ebbb37c610217ff00755e3731df6a1db46eda4cec45555157704ab545902bf",
+  "native_build_type": "RelWithDebInfo (-O2)",
+  "sbDiagnostics": "OFF",
+  "sbBringup": "ON",
+  "debuggable": true,
+  "adreno_tested": false,
+  "performance_change": false
+}

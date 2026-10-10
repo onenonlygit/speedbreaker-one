@@ -229,3 +229,37 @@ quoting. Capture-limit, actual shader translator, eight optimized/validated
 SPIR-V modules, ZPD, ISO reader, PNG/ZIP and syntax checks pass. These supersede
 the previous build blocker. No RP6/ADB/LAN access or visual fix performed.
 0.1.4 is preserved. Metadata is under builds/android/0.1.5-android-visual-diagnostic/.
+
+## 0.1.6 upstream lighting and methodology — October 10, 2026
+
+Selective v0.1.1 integration (`05838d6`): shared GLSL depth pack clamps to
+24 bits before shifting. Exhaustive separate/FMA boundary regression and actual
+resolve integration passed. Published lighting commit `237b0d7`; methodology,
+roadmap and version commit `2efca3b` (the APK's clean source identity).
+`AGENTS.md` requires ENGINEERING_METHODOLOGY.md for future work. See
+ANDROID_UPSTREAM_016.md for other changes deferred and competing flicker hypotheses.
+No extra performance policy/quality change; no measured gain claimed.
+
+Optimized full ARM64 release passed, sbDiagnostics=OFF, sbBringup=ON.
+Package retained, name 0.1.6, code 7; native version also 0.1.6.
+Certificate matches preserved 0.1.4/0.1.5. APK SHA256
+`d8a4b30c1340f3e1091cfdc3594aba309b53341c1544e7e32a627e13793d918c`;
+libmain Build ID `1b1c1a2d32394a1eb88f39f5d229b06cfa17b57d` matches
+packaged/unstripped binaries. All 56,165 translated functions present.
+Metadata, checksum, release notes and minimal test are in builds/android/0.1.6-android-lighting/.
+No XEX, generated PPC source, signing secrets, raw shaders or device logs published.
+
+Validation: depth exhaustive/round-trip/text/integration test; eight actual resolve
+variants and eight translator modules compiled optimized for Vulkan 1.1/1.2 and
+SPIR-V validated; capture, ZPD, ISO concurrent/lifetime/bounds, atomics, block ranges,
+frame policy, whole-vblank and write-watch modes 0/1 pass. Write-watch requires
+Clang (GCC rejects existing PPC debugtrap/anonymous aggregate syntax); host Clang
+from NDK with Linux sysroot succeeds. Existing SDL routing was retained/compiled;
+no new host audio test or device audio validation was run. Native SDK/NDK/JDK/Gradle
+were restored from official sources; Gradle archive hash matched pinned checksum.
+No RP6, ADB/LAN, Career or desktop gameplay execution occurred.
+
+Most valuable next test: two-minute same-scene 720p Quick Race, checking restored
+sunlight and stable shadows; evaluate warmed `[perf]`/`[hitch]` only after the three
+bounded captures finish. Check audio/mirror/HUD and start a second race. Source
+review alone cannot identify the RP6 critical path. Return one private archive.

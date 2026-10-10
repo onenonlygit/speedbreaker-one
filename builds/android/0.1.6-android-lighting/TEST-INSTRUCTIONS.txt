@@ -1,0 +1,17 @@
+Install SpeedBreaker-One-arm64-0.1.6.apk over 0.1.4/0.1.5; keep app data and ISO.
+No uninstall, Career progression or new game extraction is required.
+
+Use internal 1x 1280x720, same Quick Race/track/car, performance mode and brightness.
+Drive for two minutes. Check sunlit roads/car, projected shadows and flicker.
+The existing three-frame visual capture causes deliberate pauses: wait until it
+finishes; exclude those frames and surrounding timing windows from FPS comparisons.
+Check engine sound/music, mirror/reflections/HUD; finish and start a second race.
+Keep device thermals comparable and report typical FPS/spikes/watts if available.
+
+The single most useful return is one private session/capture archive, including
+[perf], [hitch], [untiled-area], GPU timestamp-enabled/unavailable lines and the
+capture manifest. Existing local collector: scripts/android/capture_visual_fidelity.sh.
+Only run it on your own already-configured device connection if desired; it has
+not been run by this build task. No wireless ADB setup is required by these notes.
+
+0.1.6 was built and signed offline, not tested on Adreno. Preserve the old APKs.
