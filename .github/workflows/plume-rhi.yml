@@ -3,7 +3,7 @@ on:
   push:
     branches: ['android/plume-rhi']
   pull_request:
-    paths: ['cmake/**', 'patches/plume/**', 'runtime/gpu/**', 'runtime/game/graphics_shaders.cpp', 'tests/game_shader_test.cpp', 'tests/plume/**', 'tests/native_runtime/**', '.github/workflows/plume-rhi.yml']
+    paths: ['cmake/**', 'patches/plume/**', 'runtime/gpu/**', 'runtime/game/graphics_shaders.cpp', 'runtime/game/native_graphics.*', 'tests/game_shader_test.cpp', 'tests/plume/**', 'tests/native_runtime/**', '.github/workflows/plume-rhi.yml']
   workflow_dispatch:
 permissions:
   contents: read

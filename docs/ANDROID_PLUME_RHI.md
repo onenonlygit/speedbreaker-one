@@ -135,3 +135,11 @@ for exact evidence, CPU timing-hook correction and remaining game contracts.
 
 This remains a source implementation stage: native gameplay routing and its
 packaged Android APK are incomplete. The last packaged APK remains 0.1.15.
+
+The subsequent [native audit](ANDROID_NATIVE_AUDIT.md) identifies the unconnected
+game-call boundary and records its next implementation: USA surface allocation,
+color/depth binding and heap-free wrappers forwarding to an explicitly attached
+native device. These wrappers now drive validated GPU resource lifetime/binding
+in the full fixture, including original-context preservation and actual image
+readback. Normal gameplay does not attach this partial path; complete native
+gameplay, multisampling, CPU aliases/locks and its APK remain outstanding.

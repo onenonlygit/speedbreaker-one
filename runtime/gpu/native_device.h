@@ -13,6 +13,13 @@ namespace gpu::native_render {
 class Device {
 public:
     struct IndexBuffer {uint32_t physical=0,bytes=0;bool indices32=false;uint32_t endian=0;};
+    TargetDesc DescribeSurface(uint32_t object) {std::lock_guard lock(mutex_);return Surface(object);}
+    void Reset() {
+        std::lock_guard lock(mutex_);
+        for(const auto& [object,surface]:surfaces_) worker::Destroy(surface.handle);
+        surfaces_.clear();colors_={};textures_={};depth_=0;
+        vertex_.reset();pixel_.reset();scissorSet_=false;
+    }
     TargetDesc CreateSurface(uint32_t object,uint32_t width,uint32_t height,uint32_t format,bool depth) {
         if(!object||!width||!height||width>16384||height>16384) throw std::invalid_argument("invalid native surface object/extent");
         std::lock_guard lock(mutex_);

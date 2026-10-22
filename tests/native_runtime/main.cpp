@@ -11,6 +11,7 @@
 namespace video {extern VulkanContext testContext;extern VkImage presented;}
 namespace nr=gpu::native_render;
 namespace worker=nr::worker;
+void TestNativeSurfaceHooks();
 static std::atomic<unsigned> errors{};
 static VKAPI_ATTR VkBool32 VKAPI_CALL Debug(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
     VkDebugUtilsMessageTypeFlagsEXT,const VkDebugUtilsMessengerCallbackDataEXT* data,void*) {
@@ -198,7 +199,10 @@ layout(location=0) out vec4 color;void main(){color=vec4(.25,.5,.75,1);})"));
     device.DestroySurface(0x5000);assert(worker::GetMemoryStats().targetCount==0);
     auto bridged=gpu::plume_rhi::GetCounters();assert(bridged.draws==counters.draws+1&&bridged.indexedDraws==counters.indexedDraws+1);
     assert(bridged.dispatches==0&&errors==0);
-    std::cout<<"Native owner: exact draw/sample/depth/copy output, presentation and retirement; zero validation errors\n"<<std::flush;
+    TestNativeSurfaceHooks();assert(errors==0);
+    auto hooked=gpu::plume_rhi::GetCounters();assert(hooked.draws==bridged.draws+1);
+    assert(hooked.indexedDraws==bridged.indexedDraws&&hooked.dispatches==0);
+    std::cout<<"Native owner and game surface hooks: exact GPU output, context preservation and retirement; zero validation errors\n"<<std::flush;
     // Production owner/completion/compiler threads live until process exit.
     std::_Exit(0);
 }

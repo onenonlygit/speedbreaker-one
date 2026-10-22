@@ -18,4 +18,5 @@ int main() {
     memcpy(&actual,&input,sizeof(input));sub_82597498(actual,nullptr);
     assert(swaps==1&&waits==1&&!memcmp(&actual,&expected,sizeof(actual)));
     assert(!timeline::t_waitTargetMarked);
+    puts("Game swap/wait wrappers preserve original calls and returned context");
 }

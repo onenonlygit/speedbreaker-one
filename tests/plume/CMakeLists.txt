@@ -63,3 +63,8 @@ target_compile_definitions(legacy_backend_compile_check PRIVATE VK_NO_PROTOTYPES
 target_compile_options(legacy_backend_compile_check PRIVATE -UNDEBUG -include volk.h)
 target_link_libraries(legacy_backend_compile_check PRIVATE volk)
 add_test(NAME legacy_without_plume COMMAND legacy_backend_compile_check)
+set_tests_properties(vertex_route_addresses PROPERTIES PASS_REGULAR_EXPRESSION "Vertex route source/address parity:.*words passed")
+set_tests_properties(native_draw_state PROPERTIES PASS_REGULAR_EXPRESSION "Native CPU state ABI, immutable snapshots and bounds passed")
+set_tests_properties(game_shader_resources PROPERTIES PASS_REGULAR_EXPRESSION "original containers, exact variants.*budget passed")
+set_tests_properties(plume_offscreen legacy_vulkan_fallback PROPERTIES PASS_REGULAR_EXPRESSION "validation errors=0")
+set_tests_properties(legacy_without_plume PROPERTIES PASS_REGULAR_EXPRESSION "Legacy adapter without Plume passed")

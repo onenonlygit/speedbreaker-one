@@ -9,7 +9,8 @@ set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE)
 set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 add_subdirectory(${ROOT}/tools/glslang-android glslang)
-add_executable(native_runtime_test main.cpp stubs.cpp
+add_executable(native_runtime_test main.cpp stubs.cpp game_surface_hooks.cpp
+    ${ROOT}/runtime/game/native_graphics.cpp
     ${ROOT}/runtime/gpu/renderer.cpp ${ROOT}/runtime/gpu/plume_backend.cpp
     ${ROOT}/runtime/gpu/native_worker.cpp ${ROOT}/runtime/gpu/game_shader.cpp
     ${ROOT}/runtime/gpu/shader_translator.cpp ${ROOT}/runtime/gpu/xenos/ucode.cpp)
@@ -30,6 +31,7 @@ endif()
 foreach(threads RANGE 0 1)
     add_test(NAME native_runtime_${threads} COMMAND native_runtime_test)
     set_tests_properties(native_runtime_${threads} PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE
+        PASS_REGULAR_EXPRESSION "Native owner and game surface hooks:.*zero validation errors"
         ENVIRONMENT "NFSMW_PIPELINE_THREADS=${threads};NFSMW_IMAGE_POOL=0;NFSMW_LOG_UNTILED_AREA=1")
 endforeach()
 add_executable(timeline_hook_test timeline_hook.cpp ${ROOT}/runtime/debug/timeline.cpp)
@@ -37,3 +39,4 @@ get_target_property(NATIVE_INCLUDES native_runtime_test INCLUDE_DIRECTORIES)
 target_include_directories(timeline_hook_test PRIVATE ${NATIVE_INCLUDES})
 target_compile_options(timeline_hook_test PRIVATE -UNDEBUG)
 add_test(NAME game_present_hook COMMAND timeline_hook_test)
+set_tests_properties(game_present_hook PROPERTIES PASS_REGULAR_EXPRESSION "Game swap/wait wrappers preserve original calls and returned context")

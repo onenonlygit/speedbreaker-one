@@ -410,3 +410,22 @@ verified surface/index metadata, supply the logical scissor, serialize CPU
 device mutation using the game's device lock and explicitly destroy resources.
 Texture binding currently handles already-native 2D surface objects; guest
 texture aliases, cubes/mips and CPU materialization remain to implement.
+
+## Audited resource-hook integration — October 22
+
+See [ANDROID_NATIVE_AUDIT.md](ANDROID_NATIVE_AUDIT.md) for the source audit and
+subsequent implementation. Verified USA surface constructor, color/depth binding
+and game heap-free entry points now forward resource effects to an explicitly
+attached native device. Original CPU callees/context are preserved; tracked GPU
+images retire before object reuse/free. Detach drains hooks and releases images.
+
+The full renderer fixture tests these real wrappers with synthetic original
+callees, including a native draw using their binding and exact image readback.
+Seven normal and one indexed Plume draw execute with zero compute dispatches.
+Both native cases plus the timing-hook case pass with explicit completion
+markers, ASan and core/sync validation. Original game bodies and RP6 execution
+are not exercised by these fixture results.
+
+The normal game leaves resource attachment disabled. Game draw/UP, aliases and
+CPU materialization, multisampling and guest synchronization still need work;
+CP startup is unchanged. No new APK or performance result accompanies this stage.

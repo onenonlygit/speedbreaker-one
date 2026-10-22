@@ -35,3 +35,13 @@ test. Presentation checks GPU front-image bytes before/after source destruction,
 not an Android swapchain or displayed device pixels. Production
 threads live until process exit; `_Exit` avoids concurrent static destruction.
 LeakSanitizer is disabled; no device leak or Adreno performance claim follows.
+
+The fixture also links the real USA surface constructor, target/depth binding
+and heap-free wrappers with synthetic original callees. It verifies complete
+PPC context preservation, disabled pass-through, allocation failure, color/depth
+format decoding, generation reuse, a real draw through hook-established binding,
+retirement before CPU free, unrelated heap frees/devices, explicit MSAA rejection
+and detach cleanup. Seven normal and one indexed draw now execute through Plume.
+Original game function bodies are source-verified, not executed in this fixture.
+CTest requires explicit completion messages so an empty/truncated executable
+cannot be accepted as a successful zero-second run.
