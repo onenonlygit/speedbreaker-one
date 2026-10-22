@@ -1541,7 +1541,9 @@ namespace gpu::renderer
             std::unordered_map<uint32_t, VkShaderModule> variants;
         };
         std::unordered_map<uint64_t, std::unique_ptr<Shader>> s_shaders;
-        std::unordered_map<uint64_t, std::unique_ptr<Shader>> s_nativeShaders;
+        // Resource IDs are local to a library. Retain the immutable owner so
+        // separate libraries and recycled pointers cannot alias live shaders.
+        std::unordered_map<const game_shader::Resource*, std::pair<std::shared_ptr<const game_shader::Resource>, std::unique_ptr<Shader>>> s_nativeShaders;
         Shader* s_vs = nullptr;
         Shader* s_ps = nullptr;
 
@@ -2580,7 +2582,7 @@ namespace gpu::renderer
                         bpp += Is64bpp(color[i]->format) ? 8 : 4;
                         untiled = untiled || color[i]->wide;
                     }
-                untiled = untiled || (s_untiled && Reg<reg::RB_SURFACE_INFO>().msaa_samples != xenos::MsaaSamples::k1X &&
+                untiled = untiled || (!s_nativeMode && s_untiled && Reg<reg::RB_SURFACE_INFO>().msaa_samples != xenos::MsaaSamples::k1X &&
                     Reg<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable);
                 s_ua.passes++;
                 s_ua.passPixels += px;
@@ -3193,8 +3195,10 @@ namespace gpu::renderer
 
         // The pipeline for `key`; VK_NULL_HANDLE with `pending` set while a
         // worker still compiles it (the caller skips the draw).
-        VkPipeline GetPipeline(const PipelineKey& key, VkPipelineLayout layout, bool& pending, bool optional=false)
+        VkPipeline GetPipeline(const PipelineKey& key, VkPipelineLayout layout, Shader& vertex, Shader& pixel, bool& pending, bool optional=false)
         {
+            if (vertex.hash != key.vs || pixel.hash != key.ps || vertex.stage != ShaderStage::Vertex || pixel.stage != ShaderStage::Pixel)
+                throw std::logic_error("pipeline shader resources do not match key");
             pending = false;
             static PipelineKey lastKey{};
             static VkPipeline lastPipeline = VK_NULL_HANDLE;
@@ -3216,8 +3220,10 @@ namespace gpu::renderer
                 job = std::make_shared<PendingPipeline>();
                 job->queuedFrame = s_frame;
                 s_pendingPipelines[key] = job;
-                Shader* vs = s_shaders[key.vs].get();
-                Shader* ps = s_shaders[key.ps].get();
+                // Native shaders are outside the IM_LOAD cache. Both caches
+                // retain the supplied shader objects until process shutdown.
+                Shader* vs = &vertex;
+                Shader* ps = &pixel;
                 auto build = [job, key, layout, vs, ps] {
                     auto start = std::chrono::steady_clock::now();
                     VkPipeline pipeline = BuildPipeline(key, layout, *vs, *ps);
@@ -8161,7 +8167,7 @@ void main()
             key.raster |= 128u;  // Native depth/stencil, with no fragment shader stage.
 
         bool pipelinePending;
-        VkPipeline pipeline = GetPipeline(key, layout.pipeline, pipelinePending);
+        VkPipeline pipeline = GetPipeline(key, layout.pipeline, *s_vs, *s_ps, pipelinePending);
         if (pipelinePending)
             return;  // still compiling (counted in OnSwap's log)
         if (pipeline == VK_NULL_HANDLE)
@@ -8443,7 +8449,7 @@ void main()
             if(nativeGeometry) {
                 PipelineKey nativeKey=key;nativeKey.nativeInput=1;
                 bool pending=false;
-                VkPipeline nativePipeline=GetPipeline(nativeKey,layout.pipeline,pending,true);
+                VkPipeline nativePipeline=GetPipeline(nativeKey,layout.pipeline,*s_vs,*s_ps,pending,true);
                 if(nativePipeline) { pipeline=nativePipeline;key=nativeKey; }
                 else { nativeGeometry=false;s_nativeVertexStats.pending+=pending; }
             }
@@ -9559,8 +9565,10 @@ void main()
             if (!resource) return nullptr;
             if (!resource->id || resource->stage != stage || !resource->translated.ok)
                 throw std::invalid_argument("invalid native shader resource");
-            auto& shader = s_nativeShaders[resource->id];
+            auto& entry = s_nativeShaders[resource.get()];
+            auto& shader = entry.second;
             if (!shader) {
+                entry.first = resource;
                 shader = std::make_unique<Shader>();
                 shader->stage = stage;
                 shader->hash = game_shader::Hash(stage == ShaderStage::Vertex ? 0 : 1, resource->guestWords);
