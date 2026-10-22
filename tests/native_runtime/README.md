@@ -26,8 +26,10 @@ pipeline compilation run with core and synchronization validation.
 Checks exact color/scissor, sampled image, 65,538-vertex count, real translator
 hardware vertex input, library-local shader IDs, depth/stencil, offset copies,
 readback, presentation handoff/source retirement, exception propagation,
-native GPU fences and concurrent callers. Five draws and zero compute dispatches
-must execute through Plume. Shadow-memory stubs copy immutable fixture geometry;
+native GPU fences and concurrent callers. The CPU device bridge adds actual
+draw/indexed submissions from verified driver mirrors, surface object generation
+reuse and overflowing index-range rejection. Six draws, one indexed draw and zero
+compute dispatches must execute through Plume. Shadow-memory stubs copy immutable fixture geometry;
 CPU lock faults, alias materialization and gameplay bodies remain outside this
 test. Presentation checks GPU front-image bytes before/after source destruction,
 not an Android swapchain or displayed device pixels. Production

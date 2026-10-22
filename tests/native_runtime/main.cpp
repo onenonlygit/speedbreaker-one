@@ -1,6 +1,7 @@
 // Production native renderer and owner thread; no PM4 decoder/register file.
 #include <stdafx.h>
 #include <gpu/native_worker.h>
+#include <gpu/native_device.h>
 #include <gpu/plume_backend.h>
 #include <video/presenter.h>
 #include <user/settings.h>
@@ -164,6 +165,39 @@ layout(location=0) out vec4 color;void main(){color=vec4(.25,.5,.75,1);})");
     auto front=video::presented;worker::Destroy(a.handle);assert(video::presented==front);assert(PresentedPixels()==pixels);
     worker::Destroy(b.handle);worker::Destroy(c.handle);worker::Destroy(depth.handle);assert(worker::GetMemoryStats().targetCount==0);
     auto counters=gpu::plume_rhi::GetCounters();assert(counters.draws==5);assert(counters.dispatches==0);assert(errors==0);
+    // Semantic CPU device bridge -> verified CPU mirrors -> owner -> real GPU.
+    nr::Device device;
+    auto surface=device.CreateSurface(0x5000,16,16,0,false);device.SetColor(0,0x5000);
+    device.SetScissor({2,3,10,12});
+    device.SetShaders(Resource(7,gpu::ShaderStage::Vertex,R"(#version 450
+void main(){vec2 p=vec2((gl_VertexIndex<<1)&2,gl_VertexIndex&2);gl_Position=vec4(p*2-1,.25,1);})"),
+        Resource(8,gpu::ShaderStage::Pixel,R"(#version 450
+layout(location=0) out vec4 color;void main(){color=vec4(.25,.5,.75,1);})"));
+    std::array<uint32_t,0x3400/4> mirrors{};
+    auto field=[&](uint32_t reg,uint32_t value){mirrors[nr::DrawState::MirrorOffset(reg)/4]=value;};
+    using namespace xe::gpu;
+    field(XE_GPU_REG_RB_MODECONTROL,4);field(XE_GPU_REG_RB_COLOR_MASK,15);field(XE_GPU_REG_RB_BLENDCONTROL0,0x10001);
+    field(XE_GPU_REG_PA_CL_VTE_CNTL,0x3f);field(XE_GPU_REG_PA_CL_VPORT_XSCALE,std::bit_cast<uint32_t>(8.f));
+    field(XE_GPU_REG_PA_CL_VPORT_YSCALE,std::bit_cast<uint32_t>(8.f));field(XE_GPU_REG_PA_CL_VPORT_XOFFSET,std::bit_cast<uint32_t>(8.f));
+    field(XE_GPU_REG_PA_CL_VPORT_YOFFSET,std::bit_cast<uint32_t>(8.f));field(XE_GPU_REG_PA_CL_VPORT_ZSCALE,std::bit_cast<uint32_t>(1.f));
+    auto read=[&](uint32_t address){assert(address>=0x1000&&(address-0x1000)/4<mirrors.size());return mirrors[(address-0x1000)/4];};
+    device.Clear(0x5000,0,0,16,16,black,1,0);device.DrawVertices(0x1000,read,4,0,3);
+    assert(device.Readback(0x5000,0,0,16,16)==pixels);
+    const uint16_t indices[]={std::byteswap(uint16_t(999)),0,std::byteswap(uint16_t(1)),std::byteswap(uint16_t(2))};
+    memcpy(g_memory.base+0xA0020000ull,indices,sizeof(indices));
+    device.Clear(0x5000,0,0,16,16,black,1,0);
+    device.DrawIndexed(0x1000,read,4,{0x20000,sizeof(indices),false,1},1,3);
+    assert(device.Readback(0x5000,0,0,16,16)==pixels);
+    rejected=false;try {device.DrawIndexed(0x1000,read,4,{0x20000,sizeof(indices),false,1},2,3);} catch(const std::out_of_range&) {rejected=true;}
+    assert(rejected);
+    rejected=false;try {device.DrawIndexed(0x1000,read,4,{0x20000,sizeof(indices),true,2},UINT32_MAX,UINT32_MAX);} catch(const std::out_of_range&) {rejected=true;}
+    assert(rejected);
+    auto replacement=device.CreateSurface(0x5000,16,16,0,false);assert(replacement.handle!=surface.handle);
+    device.Clear(0x5000,0,0,16,16,black,1,0);auto empty=device.Readback(0x5000,0,0,16,16);
+    for(unsigned i=0;i<256;++i) {assert(empty[i*4]==0&&empty[i*4+1]==0&&empty[i*4+2]==0&&empty[i*4+3]==255);}
+    device.DestroySurface(0x5000);assert(worker::GetMemoryStats().targetCount==0);
+    auto bridged=gpu::plume_rhi::GetCounters();assert(bridged.draws==counters.draws+1&&bridged.indexedDraws==counters.indexedDraws+1);
+    assert(bridged.dispatches==0&&errors==0);
     std::cout<<"Native owner: exact draw/sample/depth/copy output, presentation and retirement; zero validation errors\n"<<std::flush;
     // Production owner/completion/compiler threads live until process exit.
     std::_Exit(0);

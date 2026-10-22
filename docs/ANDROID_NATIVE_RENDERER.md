@@ -386,3 +386,27 @@ aliases/cubes/mips and CPU materialization, then replacing guest fence/event/
 query/ring contracts and disabling CP startup. The owner/fence implementation
 and validated GPU operations provide those hooks' execution destination;
 the current game still uses the compatibility renderer until that migration.
+
+### CPU device bridge
+
+`native_device.h` now supplies the resource/state destination for D3D game
+hooks: explicit surface create/destroy, bindings, immutable shaders, semantic
+scissor, CPU mirror capture, full-width draws and bounds-checked indexed draws.
+Surface handles use allocation generations, including repeated creation at the
+same game-object address. Replacing/destroying a surface retires its GPU image;
+destroying it also unbinds references. No EDRAM placement supplies identity.
+Clear/copy/readback/presentation enter the existing native owner directly.
+
+The full GPU fixture executes this bridge from synthetic CPU D3D mirrors.
+Both normal and guest-endian indexed draws reproduce the reference pixels;
+reused object addresses produce distinct handles and cleared replacement pixels.
+Out-of-range and overflowing index ranges are rejected before any GPU access.
+The complete fixture now records six normal and one indexed Plume draw with
+zero compute dispatches. All three CTest cases pass with core/sync validation
+and ASan. The six preexisting Release Plume/Legacy cases also pass locally.
+
+Original game calls are not hooked into this bridge yet. Callers must provide
+verified surface/index metadata, supply the logical scissor, serialize CPU
+device mutation using the game's device lock and explicitly destroy resources.
+Texture binding currently handles already-native 2D surface objects; guest
+texture aliases, cubes/mips and CPU materialization remain to implement.
