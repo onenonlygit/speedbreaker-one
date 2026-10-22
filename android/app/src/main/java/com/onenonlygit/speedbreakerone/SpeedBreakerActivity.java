@@ -78,6 +78,7 @@ public final class SpeedBreakerActivity extends SDLActivity {
         android.os.Process.killProcess(android.os.Process.myPid());
     }
 
+    public int rendererBackendOverride() { return getIntent().getIntExtra("renderer_backend", -1); }
     public String gpuDriverDirectory() { String s=getIntent().getStringExtra("driver_dir"); return s==null?"":s; }
     public String gpuDriverLibrary() { String s=getIntent().getStringExtra("driver_lib"); return s==null?"":s; }
     public String gpuDriverName() { String s=getIntent().getStringExtra("driver_name"); return s==null?"System":s; }

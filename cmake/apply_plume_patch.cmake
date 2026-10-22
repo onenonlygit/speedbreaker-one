@@ -1,0 +1,13 @@
+find_program(GIT_EXECUTABLE git REQUIRED)
+foreach(PATCH IN ITEMS "${PATCH}" "${PATCH2}" "${PATCH3}")
+if(NOT PATCH)
+    continue()
+endif()
+execute_process(COMMAND "${GIT_EXECUTABLE}" apply --reverse --check "${PATCH}" WORKING_DIRECTORY "${SOURCE}" RESULT_VARIABLE already OUTPUT_QUIET ERROR_QUIET)
+if(already EQUAL 0)
+    continue()
+endif()
+execute_process(COMMAND "${GIT_EXECUTABLE}" apply --check "${PATCH}" WORKING_DIRECTORY "${SOURCE}" COMMAND_ERROR_IS_FATAL ANY)
+execute_process(COMMAND "${GIT_EXECUTABLE}" apply "${PATCH}" WORKING_DIRECTORY "${SOURCE}" COMMAND_ERROR_IS_FATAL ANY)
+
+endforeach()

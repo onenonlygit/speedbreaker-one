@@ -3,6 +3,11 @@
 // vulkan/vulkan_pipeline_cache.cc.
 #include <stdafx.h>
 #include "renderer.h"
+#include "plume_backend.h"
+#include "vertex_route.h"
+#ifdef __ANDROID__
+#include <platform/android/gpu_driver.h>
+#endif
 #include <cpu/guest_thread.h>
 #include <cpu/host_cpu.h>
 #include <cpu/guest_time.h>
@@ -13,6 +18,9 @@
 #include "memory_plan.h"
 #include "pipeline_cache_header.h"
 #include "shader_translator.h"
+#include "game_shader.h"
+#include "native_draw_state.h"
+#include "native_image_commands.h"
 #include "zpd_report.h"
 #include "visual_capture.h"
 #include <report/zip.h>
@@ -66,6 +74,19 @@ namespace gpu::renderer
         const video::VulkanContext* s_vk = nullptr;
         VkDevice s_dev = VK_NULL_HANDLE;
         const uint32_t* s_regs = nullptr;
+        const native_render::Draw* s_nativeDraw = nullptr;
+        bool s_nativeMode = false;
+        std::thread::id s_nativeOwner;
+        const uint32_t* StateWords(uint32_t index, uint32_t count = 1)
+        {
+            if (s_nativeDraw) return s_nativeDraw->state.Words(index, count);
+            if (!s_regs) throw std::logic_error("renderer state unavailable");
+            return s_regs + index;
+        }
+        uint32_t StateWord(uint32_t index)
+        {
+            return s_nativeDraw ? s_nativeDraw->state.Word(index) : *StateWords(index);
+        }
         PFN_vkCmdPushDescriptorSetKHR s_pushDescriptorSet = nullptr;
         Stats s_stats{};
         // NFSMW_GPU_EXP bitmask, for performance experiments: 1 skip draw
@@ -112,7 +133,8 @@ namespace gpu::renderer
         float RegF(uint32_t index)
         {
             float f;
-            memcpy(&f, &s_regs[index], 4);
+            const uint32_t value = StateWord(index);
+            memcpy(&f, &value, 4);
             return f;
         }
 
@@ -120,7 +142,7 @@ namespace gpu::renderer
         T Reg()
         {
             T t;
-            t.value = s_regs[T::register_index];
+            t.value = StateWord(T::register_index);
             return t;
         }
 
@@ -128,7 +150,7 @@ namespace gpu::renderer
         T RegAt(uint32_t index)
         {
             T t;
-            t.value = s_regs[index];
+            t.value = StateWord(index);
             return t;
         }
 
@@ -282,7 +304,13 @@ namespace gpu::renderer
         // XenosConstants (shader_translator.cpp): c[512], fetch[48], bools[2],
         // loops[8], drawInfo[4], each a vec4/uvec4.
         constexpr uint32_t kTextureReciprocalOffset = (512 + 48 + 2 + 8 + 4) * 16;
-        constexpr uint32_t kConstantsSize = kTextureReciprocalOffset + 32 * 16;
+        bool s_nativeVertexInput=false;
+        struct NativeVertexStats { uint64_t candidates=0,draws=0,attributes=0,indicesScanned=0,pending=0,prepareNs=0; } s_nativeVertexStats;
+        uint32_t s_nativeMaxAttributes=0, s_nativeMaxStride=0;
+        bool s_nativeFormats[4]={};
+        struct VertexRouteStats { uint64_t draws=0, snapshots=0, shared=0, fallback=0, changes=0; } s_vertexRouteStats;
+        constexpr uint32_t kVertexRoutesOffset = kTextureReciprocalOffset + 32 * 16;
+        constexpr uint32_t kConstantsSize = kVertexRoutesOffset + 96 * sizeof(uint32_t);
 
         // Image memory. Images are bound at offsets into blocks of device
         // memory (64 MB; gpu/block_ranges.h keeps each block's free ranges),
@@ -321,6 +349,7 @@ namespace gpu::renderer
             VkDeviceSize bytes = 0;  // its allocation or range (the [perf] line's memory)
             ImageBlock* block = nullptr;  // bound at `offset` in this block, if any
             VkDeviceSize offset = 0;
+            std::shared_ptr<gpu::plume_rhi::ImageAllocation> plumeAllocation;
         };
 
         const bool s_imagePool = [] { const char* v = std::getenv("NFSMW_IMAGE_POOL"); return !v || v[0] != '0'; }();
@@ -520,36 +549,45 @@ namespace gpu::renderer
             ici.tiling = VK_IMAGE_TILING_OPTIMAL;  // (image memory blocks hold nothing linear)
             ici.usage = usage;
             ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            VkResult result = vkCreateImage(s_dev, &ici, nullptr, &img.image);
-            if (fallible && result != VK_SUCCESS)
-                return {};
-            Check(result, "vkCreateImage");
-            VkMemoryDedicatedRequirements dedicated{ VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS };
-            VkMemoryRequirements2 req2{ VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dedicated };
-            if (s_imagePool)
-            {
-                VkImageMemoryRequirementsInfo2 info{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2, nullptr, img.image };
-                vkGetImageMemoryRequirements2(s_dev, &info, &req2);
+            VkResult result;
+            if (gpu::plume_rhi::Enabled()) {
+                result = gpu::plume_rhi::AllocateImage(ici, img.image, img.bytes, img.plumeAllocation);
+                if (fallible && result != VK_SUCCESS) return {};
+                Check(result, "Plume image allocation");
+                // VMA owns physical block allocations; don't count its logical
+                // images as legacy vkAllocateMemory calls in the old diagnostics.
+            } else {
+                result = vkCreateImage(s_dev, &ici, nullptr, &img.image);
+                if (fallible && result != VK_SUCCESS)
+                    return {};
+                Check(result, "vkCreateImage");
+                VkMemoryDedicatedRequirements dedicated{ VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS };
+                VkMemoryRequirements2 req2{ VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dedicated };
+                if (s_imagePool)
+                {
+                    VkImageMemoryRequirementsInfo2 info{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2, nullptr, img.image };
+                    vkGetImageMemoryRequirements2(s_dev, &info, &req2);
+                }
+                else
+                    vkGetImageMemoryRequirements(s_dev, img.image, &req2.memoryRequirements);
+                const VkMemoryRequirements& req = req2.memoryRequirements;
+                uint32_t memoryType = FindMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                img.bytes = req.size;
+                if (!s_imagePool || dedicated.prefersDedicatedAllocation || dedicated.requiresDedicatedAllocation ||
+                    req.size > s_blockSize / 2 || !BindToBlock(img, req, memoryType))
+                {
+                    VkMemoryDedicatedAllocateInfo dai{ VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, nullptr, img.image };
+                    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                    mai.pNext = dedicated.requiresDedicatedAllocation ? &dai : nullptr;
+                    mai.allocationSize = req.size;
+                    mai.memoryTypeIndex = memoryType;
+                    auto allocationStart = std::chrono::steady_clock::now();
+                    Check(vkAllocateMemory(s_dev, &mai, nullptr, &img.memory), "vkAllocateMemory(image)");
+                    s_imageTotals.allocations++;
+                    s_imageTotals.allocationNs += SinceNs(allocationStart);
+                }
+                Check(vkBindImageMemory(s_dev, img.image, img.memory, img.offset), "vkBindImageMemory");
             }
-            else
-                vkGetImageMemoryRequirements(s_dev, img.image, &req2.memoryRequirements);
-            const VkMemoryRequirements& req = req2.memoryRequirements;
-            uint32_t memoryType = FindMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            img.bytes = req.size;
-            if (!s_imagePool || dedicated.prefersDedicatedAllocation || dedicated.requiresDedicatedAllocation ||
-                req.size > s_blockSize / 2 || !BindToBlock(img, req, memoryType))
-            {
-                VkMemoryDedicatedAllocateInfo dai{ VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, nullptr, img.image };
-                VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-                mai.pNext = dedicated.requiresDedicatedAllocation ? &dai : nullptr;
-                mai.allocationSize = req.size;
-                mai.memoryTypeIndex = memoryType;
-                auto allocationStart = std::chrono::steady_clock::now();
-                Check(vkAllocateMemory(s_dev, &mai, nullptr, &img.memory), "vkAllocateMemory(image)");
-                s_imageTotals.allocations++;
-                s_imageTotals.allocationNs += SinceNs(allocationStart);
-            }
-            Check(vkBindImageMemory(s_dev, img.image, img.memory, img.offset), "vkBindImageMemory");
             VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
             vci.pNext = viewNext;
             vci.image = img.image;
@@ -575,6 +613,11 @@ namespace gpu::renderer
         {
             if (img.view)
                 vkDestroyImageView(s_dev, img.view, nullptr);
+            if (img.plumeAllocation) {
+                img.plumeAllocation.reset();
+                img = {};
+                return;
+            }
             if (img.image)
                 vkDestroyImage(s_dev, img.image, nullptr);
             if (ImageBlock* block = img.block)
@@ -677,7 +720,7 @@ namespace gpu::renderer
             uint32_t depthBase = 0, colorMask = 0, draws = 0, depthOnlyDraws = 0;
             uint32_t loadMask = 0, storeMask = 0, alphaDraws = 0;
             uint64_t bytes = 0, vertices = 0, indices = 0;
-            uint32_t noFragmentDraws = 0, eligibleDepthDraws = 0, snapshotDraws = 0, snapshotRanges = 0;
+            uint32_t noFragmentDraws = 0, eligibleDepthDraws = 0, snapshotDraws = 0, snapshotRanges = 0, nativeDraws = 0;
             uint64_t snapshotBytes = 0;
         };
         struct TimedSlot
@@ -755,7 +798,7 @@ namespace gpu::renderer
                 auto path = GetUserPath() / "logs" / ("gpu-passes-" + std::to_string(std::time(nullptr)) + ".csv");
                 std::error_code error; std::filesystem::create_directories(path.parent_path(), error);
                 FILE* out = fopen(path.c_str(), "w");
-                if (out) fputs("frame,submission,slot,region,kind,status,gpu_us,gap_before_us,width,height,base,format,depth_base,color_mask,draws,depth_only_draws,last_vs_hash,last_ps_hash,bytes,dropped_regions,submission_gpu_us,attachment_load_mask,attachment_store_mask,alpha_test_draws,no_fragment_requested_draws,eligible_no_fragment_draws,nonindexed_vertices,index_elements,first_vs_hash,first_ps_hash,snapshot_draws,snapshot_upload_ranges,snapshot_upload_bytes\n", out);
+                if (out) fputs("frame,submission,slot,region,kind,status,gpu_us,gap_before_us,width,height,base,format,depth_base,color_mask,draws,depth_only_draws,last_vs_hash,last_ps_hash,bytes,dropped_regions,submission_gpu_us,attachment_load_mask,attachment_store_mask,alpha_test_draws,no_fragment_requested_draws,eligible_no_fragment_draws,nonindexed_vertices,index_elements,first_vs_hash,first_ps_hash,snapshot_draws,snapshot_upload_ranges,snapshot_upload_bytes,native_geometry_draws\n", out);
                 fprintf(stderr, "[gpu-pass] output %s (%s); ordered GPU intervals, sampled frames may be perturbed; no readbacks or waits\n",
                     path.string().c_str(), out ? "ready" : "FAILED");
                 return out;
@@ -772,7 +815,7 @@ namespace gpu::renderer
                 if (us < 0) ++unavailable; else total += us;
                 if (csv && rows < 40000)
                 {
-                    fprintf(csv, "%llu,%llu,%u,%u,%s,%d,%.3f,%.3f,%u,%u,%u,%u,%u,%u,%u,%u,%016llx,%016llx,%llu,%u,%.3f,%u,%u,%u,%u,%u,%llu,%llu,%016llx,%016llx,%u,%u,%llu\n",
+                    fprintf(csv, "%llu,%llu,%u,%u,%s,%d,%.3f,%.3f,%u,%u,%u,%u,%u,%u,%u,%u,%016llx,%016llx,%llu,%u,%.3f,%u,%u,%u,%u,%u,%llu,%llu,%016llx,%016llx,%u,%u,%llu,%u\n",
                         (unsigned long long)region.frame, (unsigned long long)submission, index, i, region.kind,
                         ready ? 0 : int(status == VK_SUCCESS ? VK_NOT_READY : status), us, gap,
                         region.width, region.height, region.base, region.format, region.depthBase, region.colorMask,
@@ -781,7 +824,7 @@ namespace gpu::renderer
                         region.noFragmentDraws, region.eligibleDepthDraws,
                         (unsigned long long)region.vertices, (unsigned long long)region.indices,
                         (unsigned long long)region.firstVs, (unsigned long long)region.firstPs,
-                        region.snapshotDraws, region.snapshotRanges, (unsigned long long)region.snapshotBytes);
+                        region.snapshotDraws, region.snapshotRanges, (unsigned long long)region.snapshotBytes,region.nativeDraws);
                     ++rows;
                 }
                 last = ts[2]; lastReady = ready;
@@ -937,6 +980,7 @@ namespace gpu::renderer
             VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
             bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             Check(vkBeginCommandBuffer(s_cmd, &bi), "vkBeginCommandBuffer");
+            gpu::plume_rhi::BeginRecording(s_cmd);
             s_recording = true;
             s_stateEpoch++;
             s_recordStart = std::chrono::steady_clock::now();
@@ -1009,7 +1053,7 @@ namespace gpu::renderer
                 else
                     video::WaitForeground(lock);
                 auto t1 = std::chrono::steady_clock::now();
-                Check(vkQueueSubmit(s_vk->queue, 1, &si, sub.fence), "vkQueueSubmit");
+                Check(gpu::plume_rhi::SubmitQueue(s_vk->queue, 1, &si, sub.fence), "vkQueueSubmit");
                 auto t2 = std::chrono::steady_clock::now();
                 s_queueLockUs += std::chrono::duration<double, std::micro>(tl - t0).count();
                 s_queueSubmitUs += std::chrono::duration<double, std::micro>(t2 - t1).count();
@@ -1377,7 +1421,7 @@ namespace gpu::renderer
             }
             s_narrowPassEnds++;
             s_barrierCounts.passEnds++;
-            NarrowBarrier(VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+            NarrowBarrier(VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
                     VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
         }
@@ -1497,6 +1541,9 @@ namespace gpu::renderer
             std::unordered_map<uint32_t, VkShaderModule> variants;
         };
         std::unordered_map<uint64_t, std::unique_ptr<Shader>> s_shaders;
+        // Resource IDs are local to a library. Retain the immutable owner so
+        // separate libraries and recycled pointers cannot alias live shaders.
+        std::unordered_map<const game_shader::Resource*, std::pair<std::shared_ptr<const game_shader::Resource>, std::unique_ptr<Shader>>> s_nativeShaders;
         Shader* s_vs = nullptr;
         Shader* s_ps = nullptr;
 
@@ -1793,19 +1840,19 @@ namespace gpu::renderer
         // A pixel shader variant: colour outputs only for bound attachments
         // (Metal rejects others), inputs only for interpolators the vertex
         // shader writes, and the alpha test compiled in only when enabled.
-        std::string VertexPreamble(uint32_t primitiveMode)
+        std::string VertexPreamble(uint32_t primitiveMode, bool nativeInput=false)
         {
-            return std::format("#define VERTEX_PRIMITIVE_MODE {}\n", primitiveMode);
+            return std::format("#define VERTEX_PRIMITIVE_MODE {}\n", primitiveMode) + (nativeInput ? "#define NATIVE_VERTEX_INPUT\n" : "");
         }
 
-        VkShaderModule VertexModule(Shader& vs, uint32_t primitiveMode, bool legacySpirv = false, bool positionOnly = false)
+        VkShaderModule VertexModule(Shader& vs, uint32_t primitiveMode, bool legacySpirv = false, bool positionOnly = false, bool nativeInput = false)
         {
-            uint32_t key = primitiveMode | (legacySpirv ? 4u : 0u) | (positionOnly ? 8u : 0u);
+            uint32_t key = (nativeInput ? 16u : 0u) | primitiveMode | (legacySpirv ? 4u : 0u) | (positionOnly ? 8u : 0u);
             std::lock_guard lock(vs.compileMutex);
             if (auto it = vs.vertices.find(key); it != vs.vertices.end())
                 return it->second;
             std::string log;
-            auto spirv = CompileGlsl(vs.info.glsl, GLSLANG_STAGE_VERTEX, log, VertexPreamble(primitiveMode) + (positionOnly ? "#define POSITION_ONLY\n" : ""), legacySpirv);
+            auto spirv = CompileGlsl(vs.info.glsl, GLSLANG_STAGE_VERTEX, log, VertexPreamble(primitiveMode,nativeInput) + (positionOnly ? "#define POSITION_ONLY\n" : ""), legacySpirv);
             VkShaderModule module = VK_NULL_HANDLE;
             if (spirv.empty())
                 fprintf(stderr, "[renderer] vs_%016llx (primitive %u): GLSL compile failed:\n%s\n",
@@ -1943,6 +1990,7 @@ namespace gpu::renderer
             VkFormat vkFormat;
             bool blendable;
             Image image;
+            std::unordered_map<uint32_t,VkImageView> nativeViews;
             VkImageView sampleView = VK_NULL_HANDLE;  // depth aspect only, for resolves
             // NFSMW_UNTILED_AREA: in the last frame untiled draws drew it (until
             // the next one's first), whether one was cut short of the
@@ -2180,7 +2228,7 @@ namespace gpu::renderer
 
         // A new target, at the current scale if its pitch is a scaled one,
         // cleared to zero (new EDRAM contents).
-        std::unique_ptr<RenderTarget> CreateTarget(uint32_t base, uint32_t format, bool depth, uint32_t pitch, bool wide)
+        std::unique_ptr<RenderTarget> CreateTarget(uint32_t base, uint32_t format, bool depth, uint32_t pitch, bool wide, uint32_t nativeHeight = 0)
         {
             // Height: whatever fits in EDRAM (2048 tiles of 80x16 32-bit
             // samples) from this base, capped at the 2048-line maximum.
@@ -2194,8 +2242,8 @@ namespace gpu::renderer
             rt->depth = depth;
             rt->wide = wide;
             rt->guestWidth = wide ? kUntiledWidth : pitch;
-            rt->guestHeight = rows;
-            if (ScaledPitch(pitch))
+            rt->guestHeight = nativeHeight ? nativeHeight : rows;
+            if (!nativeHeight && ScaledPitch(pitch))
                 rt->scale = s_renderScale;
             // (Rounded up: a pitch that isn't whole blocks at 1.5x still
             // has room for its last host column.)
@@ -2243,8 +2291,8 @@ namespace gpu::renderer
             TimingEnd(clearTiming);
             FullBarrier();
 
-            fprintf(stderr, "[renderer] EDRAM target: base %u %s format %u pitch %u -> %ux%u%s\n",
-                base, depth ? "depth" : "color", format, pitch, rt->guestWidth, rt->guestHeight,
+            fprintf(stderr, "[renderer] %s target: base %u %s format %u pitch %u -> %ux%u%s\n",
+                nativeHeight ? "native" : "EDRAM", base, depth ? "depth" : "color", format, pitch, rt->guestWidth, rt->guestHeight,
                 !rt->scale.IsOne() ? std::format(" (host {}x{})", rt->width, rt->height).c_str() : "");
             return rt;
         }
@@ -2254,6 +2302,8 @@ namespace gpu::renderer
             if (rt.sampleView && rt.sampleView != rt.image.view)
                 vkDestroyImageView(s_dev, rt.sampleView, nullptr);
             rt.sampleView = VK_NULL_HANDLE;
+            for (auto [swizzle,view] : rt.nativeViews) vkDestroyImageView(s_dev,view,nullptr);
+            rt.nativeViews.clear();
             DestroyImage(rt.image);
         }
 
@@ -2270,6 +2320,30 @@ namespace gpu::renderer
             if (!slot)
                 slot = CreateTarget(base, format, depth, pitch, wide);
             hit = { key, slot.get() };
+            return slot.get();
+        }
+
+        // Native handles include the game object's allocation generation. There
+        // is no EDRAM address in this cache, and a handle's description cannot
+        // change until explicitly destroyed after its submissions retire.
+        std::unordered_map<native_render::Handle, std::unique_ptr<RenderTarget>> s_nativeTargets;
+        RenderTarget* GetNativeTarget(const native_render::TargetDesc& desc)
+        {
+            if (!desc.handle) return nullptr;
+            if (!desc.width || !desc.height || desc.width > 16384 || desc.height > 16384)
+                throw std::invalid_argument("invalid native target extent");
+            VkPhysicalDeviceProperties properties;
+            vkGetPhysicalDeviceProperties(s_vk->physical,&properties);
+            if (desc.width>properties.limits.maxImageDimension2D || desc.height>properties.limits.maxImageDimension2D)
+                throw std::invalid_argument("native target exceeds device image limit");
+            if (desc.depth && desc.format>1) throw std::invalid_argument("invalid native depth format");
+            if (!desc.depth && !(desc.format<=7 || desc.format==10 || desc.format==12 || desc.format==14 || desc.format==15))
+                throw std::invalid_argument("invalid native color format");
+            auto& slot = s_nativeTargets[desc.handle];
+            if (!slot) slot = CreateTarget(0, desc.format, desc.depth, desc.width, false, desc.height);
+            if (slot->guestWidth != desc.width || slot->guestHeight != desc.height ||
+                slot->format != desc.format || slot->depth != desc.depth)
+                throw std::logic_error("native target handle reused with a different description");
             return slot.get();
         }
 
@@ -2294,7 +2368,7 @@ namespace gpu::renderer
             if (!s_passActive)
                 return;
             ZpdEndSegment();  // a segment never outlives its pass
-            s_vk->cmdEndRendering(s_cmd);
+            gpu::plume_rhi::EndRendering(s_cmd, s_vk->cmdEndRendering);
             s_passActive = false;
             TimingEnd(s_timedPass);
             s_timedPass = -1;
@@ -2508,7 +2582,7 @@ namespace gpu::renderer
                         bpp += Is64bpp(color[i]->format) ? 8 : 4;
                         untiled = untiled || color[i]->wide;
                     }
-                untiled = untiled || (s_untiled && Reg<reg::RB_SURFACE_INFO>().msaa_samples != xenos::MsaaSamples::k1X &&
+                untiled = untiled || (!s_nativeMode && s_untiled && Reg<reg::RB_SURFACE_INFO>().msaa_samples != xenos::MsaaSamples::k1X &&
                     Reg<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable);
                 s_ua.passes++;
                 s_ua.passPixels += px;
@@ -2616,7 +2690,7 @@ namespace gpu::renderer
                     timed.base = depth->base; timed.format = depth->format;
                 }
             }
-            s_vk->cmdBeginRendering(s_cmd, &ri);
+            gpu::plume_rhi::BeginRendering(s_cmd, &ri, s_vk->cmdBeginRendering);
             s_passActive = true;
             s_stats.passes++;
             for (const PendingClear& pc : inPass)
@@ -2711,7 +2785,7 @@ namespace gpu::renderer
                 for (uint32_t bits = vsMasks[d]; bits && why < 0; bits &= bits - 1)
                 {
                     xenos::xe_gpu_texture_fetch_t f;
-                    memcpy(&f, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + uint32_t(__builtin_ctz(bits)) * 6], sizeof(f));
+                    memcpy(&f, StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + uint32_t(__builtin_ctz(bits)) * 6), sizeof(f));
                     if (std::find(s_vertexPendingTextures.begin(), s_vertexPendingTextures.end(), (f.base_address << 12) & 0x1FFFFFFF) !=
                         s_vertexPendingTextures.end())
                         why = 2;
@@ -2719,7 +2793,7 @@ namespace gpu::renderer
             for (uint32_t word = 0; word < 3 && why < 0; word++)
                 for (uint32_t bits = s_vs->info.vertexFetchConstants[word]; bits && why < 0; bits &= bits - 1)
                 {
-                    const uint32_t* vf = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + (word * 32 + uint32_t(__builtin_ctz(bits))) * 2];
+                    const uint32_t* vf = StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + (word * 32 + uint32_t(__builtin_ctz(bits))) * 2);
                     if (pending(vf[0] & 0x1FFFFFFC, ((vf[1] >> 2) & 0xFFFFFF) * 4))
                         why = 0;
                 }
@@ -2752,6 +2826,7 @@ namespace gpu::renderer
             uint32_t depthControl;   // RB_DEPTHCONTROL (0 without a depth target, or one attached for the pass only)
             uint32_t raster;         // cull | front CW << 2 | depth clamp << 3 | depth bias << 4
             uint32_t primitiveMode;  // vertex expansion: 0 ordinary, 1 rectangle, 2 quad
+            uint32_t nativeInput;    // hardware attributes; immutable shader layout
 
             bool operator==(const PipelineKey& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
         };
@@ -2848,7 +2923,7 @@ namespace gpu::renderer
                     if (ec) ok = false;
                 }
             };
-            shader(vs, GLSLANG_STAGE_VERTEX, VertexPreamble(key.primitiveMode) +
+            shader(vs, GLSLANG_STAGE_VERTEX, VertexPreamble(key.primitiveMode,key.nativeInput!=0) +
                 ((s_depthStageReduction && (key.raster & 128u)) ? "#define POSITION_ONLY\n" : ""), ".vert");
             shader(ps, GLSLANG_STAGE_FRAGMENT, PixelPreamble(outputs, inputs, (key.raster >> 5) & 1, (key.raster >> 6) & 1), ".frag");
             auto state = std::format("result={}\nvs={:016x}\nps={:016x}\ntopology={}\nrestart={}\ncolorFormats={},{},{},{}\ndepthFormat={}\nraster={:08x}\ndepthControl={:08x}\ncolorMask={:08x}\noutputs={:x}\ninputs={:x}\nblend={:08x},{:08x},{:08x},{:08x}\n",
@@ -2870,7 +2945,7 @@ namespace gpu::renderer
         {
             const bool noFragment = (key.raster & 128u) != 0;
             const bool positionOnly = s_depthStageReduction && noFragment;
-            VkShaderModule vsModule = VertexModule(vs, key.primitiveMode, false, positionOnly);
+            VkShaderModule vsModule = VertexModule(vs, key.primitiveMode, false, positionOnly,key.nativeInput!=0);
             if (!vsModule)
                 return VK_NULL_HANDLE;
             VkPipelineShaderStageCreateInfo stages[2]{};
@@ -2889,6 +2964,18 @@ namespace gpu::renderer
                 psModule, "main", nullptr };
 
             VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+            std::vector<VkVertexInputBindingDescription> vertexBindings;
+            std::vector<VkVertexInputAttributeDescription> vertexAttributes;
+            if(key.nativeInput) {
+                const VkFormat formats[]={VK_FORMAT_R32_UINT,VK_FORMAT_R32G32_UINT,VK_FORMAT_R32G32B32_UINT,VK_FORMAT_R32G32B32A32_UINT};
+                for(uint32_t i=0;i<vs.info.nativeAttributes.size();++i) {
+                    const auto& a=vs.info.nativeAttributes[i];
+                    vertexBindings.push_back({i,a.stride,VK_VERTEX_INPUT_RATE_VERTEX});
+                    vertexAttributes.push_back({i,i,formats[a.words-1],0});
+                }
+                vi.vertexBindingDescriptionCount=uint32_t(vertexBindings.size());vi.pVertexBindingDescriptions=vertexBindings.data();
+                vi.vertexAttributeDescriptionCount=uint32_t(vertexAttributes.size());vi.pVertexAttributeDescriptions=vertexAttributes.data();
+            }
             VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
             ia.topology = VkPrimitiveTopology(key.topology);
             ia.primitiveRestartEnable = key.restart;
@@ -2986,14 +3073,14 @@ namespace gpu::renderer
             gpci.pDynamicState = &ds;
             gpci.layout = layout;
             VkPipeline pipeline = VK_NULL_HANDLE;
-            VkResult r = vkCreateGraphicsPipelines(s_dev, s_pipelineCache, 1, &gpci, nullptr, &pipeline);
+            VkResult r = gpu::plume_rhi::CreateGraphicsPipelines(s_dev, s_pipelineCache, 1, &gpci, nullptr, &pipeline);
             if (r != VK_SUCCESS && noFragment) {
                 // Keep solid casters even if a driver rejects a vertex-only pipeline.
                 stages[1].module = PixelVariant(ps, outputs, inputs, false);
                 gpci.stageCount = 2;
                 if (pipeline) vkDestroyPipeline(s_dev, pipeline, nullptr);
                 pipeline = VK_NULL_HANDLE;
-                if (stages[1].module) r = vkCreateGraphicsPipelines(s_dev, s_pipelineCache, 1, &gpci, nullptr, &pipeline);
+                if (stages[1].module) r = gpu::plume_rhi::CreateGraphicsPipelines(s_dev, s_pipelineCache, 1, &gpci, nullptr, &pipeline);
                 fprintf(stderr, "[renderer] depth-only fragment fallback result %d\n", int(r));
             }
             bool legacySpirv = false;
@@ -3008,12 +3095,12 @@ namespace gpu::renderer
                     (unsigned long long)key.vs, (unsigned long long)key.ps);
                 if (pipeline) vkDestroyPipeline(s_dev, pipeline, nullptr);
                 pipeline = VK_NULL_HANDLE;
-                stages[0].module = VertexModule(vs, key.primitiveMode, true, positionOnly);
+                stages[0].module = VertexModule(vs, key.primitiveMode, true, positionOnly,key.nativeInput!=0);
                 stages[1].module = PixelVariant(ps, outputs, inputs, (key.raster >> 5) & 1, true, (key.raster >> 6) & 1);
                 if (stages[0].module && stages[1].module)
                 {
                     legacySpirv = true;
-                    r = vkCreateGraphicsPipelines(s_dev, s_pipelineCache, 1, &gpci, nullptr, &pipeline);
+                    r = gpu::plume_rhi::CreateGraphicsPipelines(s_dev, s_pipelineCache, 1, &gpci, nullptr, &pipeline);
                     if (r == VK_SUCCESS)
                         fprintf(stderr, "[renderer] pipeline vs %016llx ps %016llx recovered with SPIR-V 1.3\n",
                             (unsigned long long)key.vs, (unsigned long long)key.ps);
@@ -3108,8 +3195,10 @@ namespace gpu::renderer
 
         // The pipeline for `key`; VK_NULL_HANDLE with `pending` set while a
         // worker still compiles it (the caller skips the draw).
-        VkPipeline GetPipeline(const PipelineKey& key, VkPipelineLayout layout, bool& pending)
+        VkPipeline GetPipeline(const PipelineKey& key, VkPipelineLayout layout, Shader& vertex, Shader& pixel, bool& pending, bool optional=false)
         {
+            if (vertex.hash != key.vs || pixel.hash != key.ps || vertex.stage != ShaderStage::Vertex || pixel.stage != ShaderStage::Pixel)
+                throw std::logic_error("pipeline shader resources do not match key");
             pending = false;
             static PipelineKey lastKey{};
             static VkPipeline lastPipeline = VK_NULL_HANDLE;
@@ -3131,8 +3220,10 @@ namespace gpu::renderer
                 job = std::make_shared<PendingPipeline>();
                 job->queuedFrame = s_frame;
                 s_pendingPipelines[key] = job;
-                Shader* vs = s_shaders[key.vs].get();
-                Shader* ps = s_shaders[key.ps].get();
+                // Native shaders are outside the IM_LOAD cache. Both caches
+                // retain the supplied shader objects until process shutdown.
+                Shader* vs = &vertex;
+                Shader* ps = &pixel;
                 auto build = [job, key, layout, vs, ps] {
                     auto start = std::chrono::steady_clock::now();
                     VkPipeline pipeline = BuildPipeline(key, layout, *vs, *ps);
@@ -3172,7 +3263,7 @@ namespace gpu::renderer
                 // is spent, draws just check. A per-draw wait made a pipeline
                 // used by 13 draws cost 47 ms a frame while it compiled.
                 auto waitStart = std::chrono::steady_clock::now();
-                if (!settings::GetBool(settings::Id::AsyncShaders) || s_frame < s_waitPipelinesUntil)
+                if (!optional && (s_nativeMode || !settings::GetBool(settings::Id::AsyncShaders) || s_frame < s_waitPipelinesUntil))
                 {
                     job->forcedWait |= s_frame < s_waitPipelinesUntil;
                     job->cv.wait(lock, [&] { return job->done; });
@@ -3184,7 +3275,7 @@ namespace gpu::renderer
                     // only checked afterwards, not waited for every frame
                     // (that cost 3 ms a frame for as long as it compiled).
                     auto start = std::chrono::steady_clock::now();
-                    int64_t budget = job->outlasted ? 0 : std::max<int64_t>(s_pipelineWaitLeftUs, 0);
+                    int64_t budget = (optional || job->outlasted) ? 0 : std::max<int64_t>(s_pipelineWaitLeftUs, 0);
                     bool ready = job->cv.wait_for(lock, std::chrono::microseconds(budget), [&] { return job->done; });
                     s_pipelineWaitLeftUs -= std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
                     if (!ready && budget > 0)
@@ -3192,8 +3283,7 @@ namespace gpu::renderer
                     if (!ready)
                     {
                         pending = true;
-                        s_pipelineSkips++;
-                        ++job->skips;
+                        if(!optional) { s_pipelineSkips++; ++job->skips; }
                         job->waitMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStart).count();
                         return VK_NULL_HANDLE;
                     }
@@ -3226,6 +3316,10 @@ namespace gpu::renderer
 
         Rect GuestScissor()
         {
+            if (s_nativeDraw) {
+                const auto& r=s_nativeDraw->state.scissor;
+                return {r.x0,r.y0,r.x1,r.y1};
+            }
             auto tl = Reg<reg::PA_SC_WINDOW_SCISSOR_TL>();
             auto br = Reg<reg::PA_SC_WINDOW_SCISSOR_BR>();
             Rect r{ int32_t(tl.tl_x), int32_t(tl.tl_y), int32_t(br.br_x), int32_t(br.br_y) };
@@ -4176,6 +4270,37 @@ void main()
         // tiled 2D slice, 4 KB-aligned (Xenia's GetGuestTextureLayout).
         enum class TexDim { k2D, k3D, kCube };
 
+        VkImageView NativeSampledView(uint32_t slot, TexDim dim, VkSampler& sampler)
+        {
+            if (slot >= 32 || dim != TexDim::k2D)
+                throw std::invalid_argument("native sampled target currently requires 2D view");
+            auto handle=s_nativeDraw->state.textures[slot];
+            auto it=s_nativeTargets.find(handle);
+            if (it==s_nativeTargets.end()) throw std::logic_error("unknown native sampled image");
+            auto& target=*it->second;
+            // End attachment writes before sampling, preserving ordered GPU
+            // residency without a tiled guest-memory store or re-upload.
+            if (s_passActive && (s_passDepth==&target ||
+                std::find(s_passColor,s_passColor+4,&target)!=s_passColor+4)) EndPass();
+            FlushPendingClears(&target);
+            xenos::xe_gpu_texture_fetch_t fetch;
+            memcpy(&fetch,StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0+slot*6,6),sizeof(fetch));
+            sampler=GetSampler(fetch,0);
+            auto& view=target.nativeViews[fetch.swizzle];
+            if (!view) {
+                auto component=[](uint32_t c) { return c<4 ? VkComponentSwizzle(VK_COMPONENT_SWIZZLE_R+c) :
+                    c==4 ? VK_COMPONENT_SWIZZLE_ZERO : c==5 ? VK_COMPONENT_SWIZZLE_ONE : VK_COMPONENT_SWIZZLE_IDENTITY; };
+                VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+                info.image=target.image.image;info.viewType=VK_IMAGE_VIEW_TYPE_2D;info.format=target.vkFormat;
+                info.components={component(fetch.swizzle&7),component((fetch.swizzle>>3)&7),
+                    component((fetch.swizzle>>6)&7),component((fetch.swizzle>>9)&7)};
+                info.subresourceRange={target.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+                Check(vkCreateImageView(s_dev,&info,nullptr,&view),"vkCreateImageView(native sampled target)");
+                s_textureViewExtents[view]={target.width,target.height};
+            }
+            return view;
+        }
+
         // What a lookup's result depends on beyond the fetch constant (for
         // the lookup cache below). `texture`: null when it isn't kept (a
         // placeholder, a scaled texture).
@@ -4191,7 +4316,7 @@ void main()
         {
             const bool cube = dim == TexDim::kCube, volume = dim == TexDim::k3D;
             xenos::xe_gpu_texture_fetch_t f;
-            memcpy(&f, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6], sizeof(f));
+            memcpy(&f, StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6), sizeof(f));
             sampler = s_sampler;
             const VkImageView dummy = s_dummy[cube ? 2 : volume ? 1 : 0].view;
             if (f.type != xenos::FetchConstantType::kTexture)
@@ -4242,9 +4367,9 @@ void main()
             {
                 s_drawUsesLoggedTexture = true;
                 s_loggedTextureFetch = std::format("slot {} dim {} fetch {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}", slot, int(dim),
-                    s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6], s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6 + 1],
-                    s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6 + 2], s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6 + 3],
-                    s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6 + 4], s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6 + 5]);
+                    StateWord(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6), StateWord(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6 + 1),
+                    StateWord(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6 + 2), StateWord(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6 + 3),
+                    StateWord(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6 + 4), StateWord(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6 + 5));
             }
             uint32_t pitchAligned = 0, rowBytes = 0, size;
             if (f.tiled)
@@ -4480,13 +4605,13 @@ void main()
                             if (!t.uploaded && slice == 0)
                                 ToGeneral(t.image.image, VK_IMAGE_ASPECT_COLOR_BIT, layers);
                             s_stateEpoch++;
-                            vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileStorePipeline);
-                            s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileStoreLayout, 0, AddSharedParts(w, 2), w);
-                            vkCmdPushConstants(s_cmd, s_untileStoreLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uc), &uc);
+                            gpu::plume_rhi::BindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileStorePipeline);
+                            gpu::plume_rhi::PushDescriptors(s_pushDescriptorSet, s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileStoreLayout, 0, AddSharedParts(w, 2), w);
+                            gpu::plume_rhi::PushConstants(s_cmd, s_untileStoreLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uc), &uc);
                             if (!(s_exp & 4))
                                 {
                                     int timed = TimingBegin("texture_compute");
-                                    vkCmdDispatch(s_cmd, (bw + 7) / 8, (bh + 7) / 8, 1);
+                                    gpu::plume_rhi::Dispatch(s_cmd, (bw + 7) / 8, (bh + 7) / 8, 1);
                                     TimingEnd(timed);
                                 }
                             FullBarrier();
@@ -4514,14 +4639,14 @@ void main()
                             { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ring, nullptr },
                         };
                         s_stateEpoch++;
-                        vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untilePipeline);
-                        s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileLayout, 0, AddSharedParts(w, 2), w);
-                        vkCmdPushConstants(s_cmd, s_untileLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uc), &uc);
+                        gpu::plume_rhi::BindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untilePipeline);
+                        gpu::plume_rhi::PushDescriptors(s_pushDescriptorSet, s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileLayout, 0, AddSharedParts(w, 2), w);
+                        gpu::plume_rhi::PushConstants(s_cmd, s_untileLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uc), &uc);
                         uint32_t groupsX = fi.convert != 0 || fi.bpbLog2 >= 2 ? bw : rowWords;
                         if (!(s_exp & 4))
                             {
                                 int timed = TimingBegin("texture_compute");
-                                vkCmdDispatch(s_cmd, (groupsX + 7) / 8, (bh + 7) / 8, 1);
+                                gpu::plume_rhi::Dispatch(s_cmd, (groupsX + 7) / 8, (bh + 7) / 8, 1);
                                 TimingEnd(timed);
                             }
                         FullBarrier();
@@ -4580,13 +4705,13 @@ void main()
                                 { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ring, nullptr },
                             };
                             s_stateEpoch++;
-                            vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untilePipeline);
-                            s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileLayout, 0, AddSharedParts(w, 2), w);
-                            vkCmdPushConstants(s_cmd, s_untileLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uc), &uc);
+                            gpu::plume_rhi::BindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untilePipeline);
+                            gpu::plume_rhi::PushDescriptors(s_pushDescriptorSet, s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileLayout, 0, AddSharedParts(w, 2), w);
+                            gpu::plume_rhi::PushConstants(s_cmd, s_untileLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uc), &uc);
                             uint32_t groupsX = fi.convert != 0 || fi.bpbLog2 >= 2 ? lbw : levelRowWords;
                             {
                                 int timed = TimingBegin("texture_compute");
-                                vkCmdDispatch(s_cmd, (groupsX + 7) / 8, (lbh + 7) / 8, 1);
+                                gpu::plume_rhi::Dispatch(s_cmd, (groupsX + 7) / 8, (lbh + 7) / 8, 1);
                                 TimingEnd(timed);
                             }
                             FullBarrier();
@@ -4720,10 +4845,12 @@ void main()
 
         VkImageView GetTexture(uint32_t slot, TexDim dim, VkSampler& sampler)
         {
+            if (s_nativeDraw && slot<32 && s_nativeDraw->state.textures[slot])
+                return NativeSampledView(slot,dim,sampler);
             TextureCache& c = *s_textureCache;
             if (!c.on)
                 return LookupTexture(slot, dim, sampler, nullptr);
-            const uint32_t* fetch = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6];
+            const uint32_t* fetch = StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6);
             TextureCacheEntry& e = c.slots[uint32_t(dim)][slot & 31];
             const bool drawScaled = s_drawScaled && s_scaled.enabled;
             const uint64_t epoch = writewatch::WriteEpoch();
@@ -5192,7 +5319,7 @@ void main()
             VkClearAttachment ca{};
             if (rt->depth)
             {
-                uint32_t v = s_regs[XE_GPU_REG_RB_DEPTH_CLEAR];
+                uint32_t v = StateWord(XE_GPU_REG_RB_DEPTH_CLEAR);
                 ca.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
                 float depth;
                 if (xenos::DepthRenderTargetFormat(rt->format) == xenos::DepthRenderTargetFormat::kD24FS8)
@@ -5210,8 +5337,8 @@ void main()
             }
             else
             {
-                uint32_t lo = s_regs[XE_GPU_REG_RB_COLOR_CLEAR];
-                uint32_t hi = s_regs[XE_GPU_REG_RB_COLOR_CLEAR_LO];
+                uint32_t lo = StateWord(XE_GPU_REG_RB_COLOR_CLEAR);
+                uint32_t hi = StateWord(XE_GPU_REG_RB_COLOR_CLEAR_LO);
                 ca.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
                 ca.colorAttachment = 0;
                 float* c = ca.clearValue.color.float32;
@@ -5519,8 +5646,8 @@ void main()
 
             // The rectangle comes from the three vertices in vertex fetch 0
             // (Direct3D 9 writes them with the CPU).
-            uint32_t fetch0 = s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0];
-            uint32_t fetch1 = s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_1];
+            uint32_t fetch0 = StateWord(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0);
+            uint32_t fetch1 = StateWord(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_1);
             uint32_t vertexAddress = fetch0 & 0x1FFFFFFC;
             uint32_t vertexEndian = fetch1 & 3;
             if ((fetch0 & 3) != 3 || ((fetch1 >> 2) & 0xFFFFFF) != 6)
@@ -5578,12 +5705,12 @@ void main()
                     "(fmt %u endian %u swap %u bias %d) | ctl %08X color %08X depth %08X clear c%08X d%08X\n",
                     r.x0, r.y0, r.x1, r.y1, wo.window_x_offset, wo.window_y_offset,
                     uint32_t(Reg<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable), copyControl.copy_src_select, pitch,
-                    uint32_t(surfaceInfo.msaa_samples), s_regs[XE_GPU_REG_RB_COPY_DEST_BASE],
+                    uint32_t(surfaceInfo.msaa_samples), StateWord(XE_GPU_REG_RB_COPY_DEST_BASE),
                     Reg<reg::RB_COPY_DEST_PITCH>().copy_dest_pitch, Reg<reg::RB_COPY_DEST_PITCH>().copy_dest_height,
-                    s_regs[XE_GPU_REG_RB_COPY_DEST_INFO], uint32_t(Reg<reg::RB_COPY_DEST_INFO>().copy_dest_format),
+                    StateWord(XE_GPU_REG_RB_COPY_DEST_INFO), uint32_t(Reg<reg::RB_COPY_DEST_INFO>().copy_dest_format),
                     uint32_t(Reg<reg::RB_COPY_DEST_INFO>().copy_dest_endian), uint32_t(Reg<reg::RB_COPY_DEST_INFO>().copy_dest_swap),
-                    int(Reg<reg::RB_COPY_DEST_INFO>().copy_dest_exp_bias), copyControl.value, s_regs[XE_GPU_REG_RB_COLOR_INFO],
-                    s_regs[XE_GPU_REG_RB_DEPTH_INFO], s_regs[XE_GPU_REG_RB_COLOR_CLEAR], s_regs[XE_GPU_REG_RB_DEPTH_CLEAR]);
+                    int(Reg<reg::RB_COPY_DEST_INFO>().copy_dest_exp_bias), copyControl.value, StateWord(XE_GPU_REG_RB_COLOR_INFO),
+                    StateWord(XE_GPU_REG_RB_DEPTH_INFO), StateWord(XE_GPU_REG_RB_COLOR_CLEAR), StateWord(XE_GPU_REG_RB_DEPTH_CLEAR));
                 if (logPitch >= 0)
                     for (int i = 0; i < 6; i++)
                     {
@@ -5610,7 +5737,7 @@ void main()
             // Copy.
             auto destInfo = Reg<reg::RB_COPY_DEST_INFO>();
             auto destPitch = Reg<reg::RB_COPY_DEST_PITCH>();
-            uint32_t destBase = s_regs[XE_GPU_REG_RB_COPY_DEST_BASE];
+            uint32_t destBase = StateWord(XE_GPU_REG_RB_COPY_DEST_BASE);
             uint32_t format = depthSource
                 ? (xenos::DepthRenderTargetFormat(Reg<reg::RB_DEPTH_INFO>().depth_format) == xenos::DepthRenderTargetFormat::kD24FS8 ? 23u : 22u)
                 : uint32_t(destInfo.copy_dest_format);
@@ -5901,14 +6028,14 @@ void main()
                     const bool wordOrder = gpu::g_workReductionEnabled && wordOrderEnabled && source->scale.IsOne() && !scaledWrite && bl == 2;
                     if (wordOrder && !s_resolveWordPipeline)
                         if (gpu::g_workReductionEnabled) MakeResolvePipeline(false, 1, 1, &s_resolveWordPipeline, true);
-                    vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, wordOrder ? s_resolveWordPipeline : ResolvePipeline(coalesced, source->scale));
-                    s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_resolveLayout, 0, AddSharedParts(w, 5), w);
-                    vkCmdPushConstants(s_cmd, s_resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, s_resolvePush, &rc);
+                    gpu::plume_rhi::BindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, wordOrder ? s_resolveWordPipeline : ResolvePipeline(coalesced, source->scale));
+                    gpu::plume_rhi::PushDescriptors(s_pushDescriptorSet, s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_resolveLayout, 0, AddSharedParts(w, 5), w);
+                    gpu::plume_rhi::PushConstants(s_cmd, s_resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, s_resolvePush, &rc);
                     uint32_t perWord = bl >= 2 ? 1 : (4 >> bl);
                     int timedResolve = TimingBegin(depthSource ? "resolve_depth" : "resolve_color",
                         rc.width, rc.height, rc.destBase, format, rangeBytes);
                     if (!(s_exp & 2))
-                        vkCmdDispatch(s_cmd, (coalesced || wordOrder) ? (rc.width + 31) / 32 : (rc.width / perWord + 7) / 8,
+                        gpu::plume_rhi::Dispatch(s_cmd, (coalesced || wordOrder) ? (rc.width + 31) / 32 : (rc.width / perWord + 7) / 8,
                             (coalesced || wordOrder) ? (rc.height + 1) / 2 : (rc.height + 7) / 8, 1);
                     if (scaledWrite)
                         FullBarrier();  // (above 1x: as before)
@@ -6060,7 +6187,7 @@ void main()
             cpci.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT,
                 module, "main", nullptr };
             cpci.layout = layout;
-            Check(vkCreateComputePipelines(s_dev, s_pipelineCache, 1, &cpci, nullptr, &pipeline), "compute pipeline");
+            Check(gpu::plume_rhi::CreateComputePipelines(s_dev, s_pipelineCache, 1, &cpci, nullptr, &pipeline), "compute pipeline");
         }
 
         // Scaled memory's GPU side (see ScaledMemory): made on the first
@@ -6396,23 +6523,23 @@ void main()
                 VkDescriptorImageInfo ii{ VK_NULL_HANDLE, t.storeView, VK_IMAGE_LAYOUT_GENERAL };
                 w[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                     &ii, nullptr, nullptr };
-                vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledStorePipeline);
-                s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledStoreLayout, 0, 3, w);
-                vkCmdPushConstants(s_cmd, s_scaledStoreLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+                gpu::plume_rhi::BindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledStorePipeline);
+                gpu::plume_rhi::PushDescriptors(s_pushDescriptorSet, s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledStoreLayout, 0, 3, w);
+                gpu::plume_rhi::PushConstants(s_cmd, s_scaledStoreLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
                 {
                     int timed = TimingBegin("texture_compute");
-                    vkCmdDispatch(s_cmd, (t.width + 7) / 8, (t.height + 7) / 8, 1);
+                    gpu::plume_rhi::Dispatch(s_cmd, (t.width + 7) / 8, (t.height + 7) / 8, 1);
                     TimingEnd(timed);
                 }
                 ComputeBarrier();
                 return;
             }
-            vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledUntilePipeline);
-            s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledUntileLayout, 0, 3, w);
-            vkCmdPushConstants(s_cmd, s_scaledUntileLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+            gpu::plume_rhi::BindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledUntilePipeline);
+            gpu::plume_rhi::PushDescriptors(s_pushDescriptorSet, s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledUntileLayout, 0, 3, w);
+            gpu::plume_rhi::PushConstants(s_cmd, s_scaledUntileLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
             {
                 int timed = TimingBegin("scaled_texture_compute", t.width, t.height);
-                vkCmdDispatch(s_cmd, (t.width + 7) / 8, (t.height + 7) / 8, 1);
+                gpu::plume_rhi::Dispatch(s_cmd, (t.width + 7) / 8, (t.height + 7) / 8, 1);
                 TimingEnd(timed);
             }
             FullBarrier();
@@ -6456,12 +6583,12 @@ void main()
                 struct { uint32_t count, slotWords, listWord, pad, scaleX, scaleY, denX, denY; } pc = { count, s_scaled.slotWords,
                     uint32_t(list / 4), 0, sc.x.num, sc.y.num, sc.x.den, sc.y.den };
                 s_stateEpoch++;
-                vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledFillPipeline);
-                s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledFillLayout, 0, AddSharedParts(w, 3), w);
-                vkCmdPushConstants(s_cmd, s_scaledFillLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+                gpu::plume_rhi::BindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledFillPipeline);
+                gpu::plume_rhi::PushDescriptors(s_pushDescriptorSet, s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledFillLayout, 0, AddSharedParts(w, 3), w);
+                gpu::plume_rhi::PushConstants(s_cmd, s_scaledFillLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
                 {
                     int timed = TimingBegin("scaled_memory_fill");
-                    vkCmdDispatch(s_cmd, (count * 1024 + 63) / 64, 1, 1);
+                    gpu::plume_rhi::Dispatch(s_cmd, (count * 1024 + 63) / 64, 1, 1);
                     TimingEnd(timed);
                 }
                 FullBarrier();
@@ -6536,7 +6663,8 @@ void main()
         // The front buffer as presented: 1x, and at host resolution when the
         // scaled resolve memory has it (two images: no stall when the game
         // switches between them, e.g. around movies).
-        Image s_front, s_frontScaled;
+        Image s_front, s_frontScaled, s_nativeFront;
+        uint32_t s_nativeFrontWidth=0, s_nativeFrontHeight=0;
         uint32_t s_frontWidth = 0, s_frontHeight = 0, s_frontScaledWidth = 0, s_frontScaledHeight = 0;
 
         // A front image the presenter may still show or be reading: taken
@@ -6589,7 +6717,7 @@ void main()
             cpci.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT,
                 module, "main", nullptr };
             cpci.layout = s_resolveLayout;
-            Check(vkCreateComputePipelines(s_dev, s_pipelineCache, 1, &cpci, nullptr, out), "resolve pipeline");
+            Check(gpu::plume_rhi::CreateComputePipelines(s_dev, s_pipelineCache, 1, &cpci, nullptr, out), "resolve pipeline");
         }
 
         // The resolve pipeline for a source at `scale` (see s_resolveDenPipelines).
@@ -6766,7 +6894,7 @@ void main()
             VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
             bci.pNext = &embci;
             bci.size = kSharedSize;
-            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
             Check(vkCreateBuffer(s_dev, &bci, nullptr, &s_shared), "vkCreateBuffer(shared)");
             VkMemoryRequirements req;
             vkGetBufferMemoryRequirements(s_dev, s_shared, &req);
@@ -6801,7 +6929,7 @@ void main()
         {
             VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
             bci.size = kSharedSize;
-            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
             VkBuffer buffer = VK_NULL_HANDLE;
             Check(vkCreateBuffer(s_dev, &bci, nullptr, &buffer), "vkCreateBuffer(shadow)");
             vkGetBufferMemoryRequirements(s_dev, buffer, &req);
@@ -6960,7 +7088,7 @@ void main()
         {
             VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
             bci.size = kRingSize;
-            bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
             Check(vkCreateBuffer(s_dev, &bci, nullptr, &s_ring), "vkCreateBuffer(ring)");
             VkMemoryRequirements req;
             vkGetBufferMemoryRequirements(s_dev, s_ring, &req);
@@ -7321,11 +7449,16 @@ void main()
         }
     }
 
-    bool Initialize(const uint32_t* regs)
+    static bool InitializeImpl(const uint32_t* regs, bool native)
     {
+        if (s_vk) throw std::logic_error("cannot start a second renderer");
         gpu::g_workReductionEnabled = settings::GetBool(settings::Id::GpuWorkReduction);
         gpu::g_predicateCoalescingEnabled = settings::GetBool(settings::Id::PredicateCoalescing);
         s_depthStageReduction = settings::GetBool(settings::Id::DepthStageReduction);
+        gpu::g_vertexRoutingEnabled = settings::GetBool(settings::Id::VertexMemoryRouting);
+        s_nativeVertexInput = settings::GetBool(settings::Id::NativeVertexInput);
+        game_shader::PublishTranslationReady(settings::GetBool(settings::Id::GameShaderResources));
+        fprintf(stderr, "[renderer] vertex memory routing=%d\n", gpu::g_vertexRoutingEnabled);
         fprintf(stderr, "[renderer] predicate coalescing=%d depth stage reduction=%d\n",
             gpu::g_predicateCoalescingEnabled, s_depthStageReduction);
         fprintf(stderr, "[renderer] GPU work reduction %s (early depth, texture reciprocals, 1x resolve lanes)\n",
@@ -7334,6 +7467,15 @@ void main()
         if (!s_vk)
             return false;
         s_dev = s_vk->device;
+        {
+            VkPhysicalDeviceProperties props;vkGetPhysicalDeviceProperties(s_vk->physical,&props);
+            s_nativeMaxAttributes=std::min({16u,props.limits.maxVertexInputAttributes,props.limits.maxVertexInputBindings});
+            s_nativeMaxStride=props.limits.maxVertexInputBindingStride;
+            const VkFormat formats[]={VK_FORMAT_R32_UINT,VK_FORMAT_R32G32_UINT,VK_FORMAT_R32G32B32_UINT,VK_FORMAT_R32G32B32A32_UINT};
+            for(unsigned i=0;i<4;++i) { VkFormatProperties f;vkGetPhysicalDeviceFormatProperties(s_vk->physical,formats[i],&f);s_nativeFormats[i]=(f.bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)!=0; }
+            fprintf(stderr,"[native-geometry] hardware input enabled=%d max_attributes=%u max_stride=%u\n",s_nativeVertexInput,s_nativeMaxAttributes,s_nativeMaxStride);
+        }
+
         s_regs = regs;
         {
             VkPhysicalDeviceProperties props;
@@ -7372,6 +7514,12 @@ void main()
             s_vk = nullptr;
             return false;
         }
+        bool requestPlume = native || settings::GetInt(settings::Id::RenderBackend) == 1;
+#ifdef __ANDROID__
+        int backendOverride = platform::android::RendererBackendOverride();
+        if (!native && backendOverride >= 0) requestPlume = backendOverride == 1;
+#endif
+        if (!gpu::plume_rhi::Initialize(s_vk->instance, s_vk->physical, s_dev, s_vk->queueFamily, requestPlume)) { s_vk=nullptr;return false; }
         glslang_initialize_process();
         CreatePipelineCache();
 
@@ -7496,9 +7644,9 @@ void main()
         CreateRing();
         CreateSet0();
         CreateSamplerAndDummies();
-        CreateResolvePipeline();
-        CreateUntilePipeline();
-        {
+        if (!native) CreateResolvePipeline();
+        CreateUntilePipeline(); // Static game textures still use their original asset layout.
+        if (!native) {
             VkDescriptorSetLayoutBinding b[4] = {
                 { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
                 { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
@@ -7514,6 +7662,12 @@ void main()
             !s_shadowMode ? "imported" : s_shadowInVram ? "copied for the GPU, in VRAM" : "copied for the GPU, in host memory",
             (unsigned long long)(kSharedSize >> 20));
         return true;
+    }
+
+    bool Initialize(const uint32_t* regs)
+    {
+        if (!regs) throw std::invalid_argument("legacy renderer requires register state");
+        return InitializeImpl(regs,false);
     }
 
     bool Enabled()
@@ -7573,10 +7727,16 @@ void main()
             slot = std::make_unique<Shader>();
             slot->stage = type == 0 ? ShaderStage::Vertex : ShaderStage::Pixel;
             slot->hash = h;
-            std::vector<uint32_t> ucode(dwords);
-            for (uint32_t i = 0; i < dwords; i++)
-                ucode[i] = __builtin_bswap32(words[i]);
-            slot->info = TranslateShader(slot->stage, ucode.data(), dwords);
+            const auto native = game_shader::Enabled() ?
+                game_shader::GetLibrary().Find(type,h,{words,dwords}) : nullptr;
+            if (native) {
+                slot->info = native->translated;
+            } else {
+                std::vector<uint32_t> ucode(dwords);
+                for (uint32_t i = 0; i < dwords; i++)
+                    ucode[i] = __builtin_bswap32(words[i]);
+                slot->info = TranslateShader(slot->stage, ucode.data(), dwords);
+            }
             if (!slot->info.ok)
                 fprintf(stderr, "[renderer] %s_%016llx: translation failed: %s\n", type == 0 ? "vs" : "ps",
                     (unsigned long long)h, slot->info.error.c_str());
@@ -7602,11 +7762,13 @@ void main()
     {
         if (!s_vk)
             return;
+        if (s_nativeMode && !s_nativeDraw) throw std::logic_error("PM4 draw on native renderer");
         reg::VGT_DRAW_INITIATOR initiator;
         initiator.value = initiatorValue;
         auto edramMode = Reg<reg::RB_MODECONTROL>().edram_mode;
         if (edramMode == xenos::EdramMode::kCopy)
         {
+            if (s_nativeDraw) throw std::logic_error("native draw cannot execute an EDRAM resolve");
             Resolve();
             return;
         }
@@ -7625,12 +7787,15 @@ void main()
         auto skip = [&](uint64_t key, const char* why) {
             s_stats.skipped++;
             LogOnce(key, "draw skipped: %s", why);
+            // A native game call must either record its work or report failure.
+            // Compatibility's missing-pipeline policy cannot silently drop it.
+            if (s_nativeDraw) throw std::runtime_error(std::string("native draw failed: ")+why);
         };
         if (!s_vs || !s_ps)
             return skip(1, "no shaders loaded");
         if (!s_vs->info.ok || !s_ps->info.ok)
             return skip(2, "a shader failed to translate");
-        uint32_t count = initiator.num_indices;
+        uint32_t count = s_nativeDraw ? s_nativeDraw->count : initiator.num_indices;
         if (count == 0)
             return;
         if (initiator.source_select == xenos::SourceSelect::kImmediate)
@@ -7641,15 +7806,19 @@ void main()
 
         auto surface = Reg<reg::RB_SURFACE_INFO>();
         uint32_t pitch = surface.surface_pitch;
+        if (s_nativeDraw) {
+            pitch=s_nativeDraw->state.depth.width;
+            for (const auto& target : s_nativeDraw->state.colors) if (target.handle) { pitch=target.width;break; }
+        }
         if (pitch == 0)
             return skip(4, "zero surface pitch");
-        auto [tileShiftX, tileShiftY] = TileShift();
+        auto [tileShiftX, tileShiftY] = s_nativeDraw ? std::pair<int32_t,int32_t>{0,0} : TileShift();
         if (tileShiftX != 0 || tileShiftY != 0)
         {
             s_stats.tileSkips++;
             return;  // drawn with tile 0 (untiled rendering)
         }
-        const bool untiledPass = s_untiled && surface.msaa_samples != xenos::MsaaSamples::k1X &&
+        const bool untiledPass = !s_nativeDraw && s_untiled && surface.msaa_samples != xenos::MsaaSamples::k1X &&
             Reg<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable;
 
         // Render targets.
@@ -7666,7 +7835,8 @@ void main()
                 if (!(s_ps->info.colorTargetMask & (1u << i)) || mask == 0)
                     continue;
                 auto ci = RegAt<reg::RB_COLOR_INFO>(infoRegs[i]);
-                color[i] = GetTarget(ci.color_base, uint32_t(ci.color_format), false, pitch);
+                color[i] = s_nativeDraw ? GetNativeTarget(s_nativeDraw->state.colors[i]) :
+                    GetTarget(ci.color_base, uint32_t(ci.color_format), false, pitch);
                 writeMask |= mask << (4 * i);
             }
         }
@@ -7675,7 +7845,8 @@ void main()
         if (depthControl.z_enable || depthControl.stencil_enable)
         {
             auto di = Reg<reg::RB_DEPTH_INFO>();
-            depth = GetTarget(di.depth_base, uint32_t(di.depth_format), true, pitch);
+            depth = s_nativeDraw ? GetNativeTarget(s_nativeDraw->state.depth) :
+                GetTarget(di.depth_base, uint32_t(di.depth_format), true, pitch);
         }
         if (!depth && writeMask == 0)
             return;  // nothing visible (memexport-only draws are not supported yet)
@@ -7796,19 +7967,19 @@ void main()
                 fprintf(stderr, "[tiles] draw %llu: msaa %u pitch %u wo (%d,%d) woEn %u | window scissor (%u,%u)-(%u,%u) offDis %u | screen scissor (%d,%d)-(%d,%d) | color %08X depth %08X vp y %.1f+%.1f\n",
                     (unsigned long long)s_stats.draws, uint32_t(surface.msaa_samples), pitch, wo.window_x_offset, wo.window_y_offset,
                     uint32_t(Reg<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable), wtl.tl_x, wtl.tl_y, wbr.br_x, wbr.br_y,
-                    wtl.window_offset_disable, stl.tl_x, stl.tl_y, sbr.br_x, sbr.br_y, s_regs[XE_GPU_REG_RB_COLOR_INFO],
-                    s_regs[XE_GPU_REG_RB_DEPTH_INFO], RegF(XE_GPU_REG_PA_CL_VPORT_YOFFSET), RegF(XE_GPU_REG_PA_CL_VPORT_YSCALE));
+                    wtl.window_offset_disable, stl.tl_x, stl.tl_y, sbr.br_x, sbr.br_y, StateWord(XE_GPU_REG_RB_COLOR_INFO),
+                    StateWord(XE_GPU_REG_RB_DEPTH_INFO), RegF(XE_GPU_REG_PA_CL_VPORT_YOFFSET), RegF(XE_GPU_REG_PA_CL_VPORT_YSCALE));
             }
         }
 
         // Primitive assembly.
         auto modeCntl = Reg<reg::PA_SU_SC_MODE_CNTL>();
-        auto dmaSize = RegAt<reg::VGT_DMA_SIZE>(0);
+        reg::VGT_DMA_SIZE dmaSize{};
         dmaSize.value = dmaSizeValue;
         IndexSource src{ initiator.source_select == xenos::SourceSelect::kDMA, dmaBase & 0x1FFFFFFF,
             initiator.index_size == xenos::IndexFormat::kInt32, uint32_t(dmaSize.swap_mode) };
         bool restartEnabled = modeCntl.multi_prim_ib_ena && src.indexed;
-        uint32_t resetIndex = s_regs[XE_GPU_REG_VGT_MULTI_PRIM_IB_RESET_INDX] & 0xFFFFFF;
+        uint32_t resetIndex = StateWord(XE_GPU_REG_VGT_MULTI_PRIM_IB_RESET_INDX) & 0xFFFFFF;
 
         DrawConstants pc{};
         VkPrimitiveTopology topology;
@@ -7964,7 +8135,7 @@ void main()
             if (!color[i])
                 continue;
             key.colorFormats[i] = color[i]->vkFormat;
-            uint32_t bc = s_regs[blendRegs[i]] & 0x1FFF1FFF;
+            uint32_t bc = StateWord(blendRegs[i]) & 0x1FFF1FFF;
             // (One, Zero, Add) for both colour and alpha is "blending off".
             if (bc != 0x00010001 && color[i]->blendable && !(adoptedColor & (1u << i)))
                 key.blend[i] = bc;
@@ -7999,7 +8170,7 @@ void main()
             key.raster |= 128u;  // Native depth/stencil, with no fragment shader stage.
 
         bool pipelinePending;
-        VkPipeline pipeline = GetPipeline(key, layout.pipeline, pipelinePending);
+        VkPipeline pipeline = GetPipeline(key, layout.pipeline, *s_vs, *s_ps, pipelinePending);
         if (pipelinePending)
             return;  // still compiling (counted in OnSwap's log)
         if (pipeline == VK_NULL_HANDLE)
@@ -8044,7 +8215,7 @@ void main()
         // Vertex data snapshots, copied into the ring with this draw's
         // constants and indices (one allocation: a submit between two would
         // leave the snapshot in the previous submission's slot).
-        struct SnapshotRange { uint32_t base, size; };
+        using SnapshotRange = gpu::vertex_route::Snapshot;
         SnapshotRange copies[4];
         uint32_t copyCount = 0;
         VkDeviceSize copyBytes = 0;
@@ -8057,7 +8228,7 @@ void main()
                     for (uint32_t bits = shader->info.vertexFetchConstants[word]; bits; bits &= bits - 1)
                     {
                         uint32_t constant = word * 32 + uint32_t(__builtin_ctz(bits));
-                        const uint32_t* vf = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + constant * 2];
+                        const uint32_t* vf = StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + constant * 2);
                         Range r{ vf[0] & 0x1FFFFFFC, ((vf[1] >> 2) & 0xFFFFFF) * 4 };
                         r.size = std::min<uint32_t>(r.size, uint32_t(kSharedSize) - r.base);
                         if (r.size == 0 || std::any_of(copies, copies + copyCount, [&](const Range& c) { return c.base == r.base && c.size == r.size; }))
@@ -8082,6 +8253,29 @@ void main()
             }
         }
 
+        // Routes depend only on the fetch ranges and snapshot layout, not the
+        // absolute ring address. Keep constant-upload reuse across fresh snapshots.
+        uint32_t vertexRoutes[96];
+        std::fill_n(vertexRoutes, 96, gpu::vertex_route::kFallback);
+        if (gpu::g_vertexRoutingEnabled)
+            for (uint32_t word = 0; word < 3; ++word)
+                for (uint32_t bits = s_vs->info.vertexFetchConstants[word] | s_ps->info.vertexFetchConstants[word]; bits; bits &= bits - 1)
+                {
+                    uint32_t constant = word * 32 + uint32_t(__builtin_ctz(bits));
+                    const uint32_t* vf = StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + constant * 2);
+                    uint32_t base = gpu::vertex_route::Base(vf[0]);
+                    vertexRoutes[constant] = gpu::vertex_route::Build(base, gpu::vertex_route::Size(base, vf[1]), copies, copyCount);
+                    if (vertexRoutes[constant] == gpu::vertex_route::kFallback) ++s_vertexRouteStats.fallback;
+                    else if (vertexRoutes[constant] == gpu::vertex_route::kShared) ++s_vertexRouteStats.shared;
+                    else ++s_vertexRouteStats.snapshots;
+                }
+        static uint32_t lastVertexRoutes[96] = {};
+        if (gpu::g_vertexRoutingEnabled) ++s_vertexRouteStats.draws;
+        if (memcmp(lastVertexRoutes, vertexRoutes, sizeof(vertexRoutes)) != 0) {
+            g_constantsDirty.store(true, std::memory_order_relaxed);
+            ++s_vertexRouteStats.changes;
+        }
+
         // NFSMW_LOG_TEXTURE_USE=<hex base>: dump the shaders of draws that
         // sample the texture at that address (once per shader pair).
         if (s_drawUsesLoggedTexture)
@@ -8100,7 +8294,7 @@ void main()
                     for (uint32_t bits = s_vs->info.vertexFetchConstants[word]; bits; bits &= bits - 1)
                     {
                         uint32_t c = word * 32 + uint32_t(__builtin_ctz(bits));
-                        const uint32_t* vf = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + c * 2];
+                        const uint32_t* vf = StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + c * 2);
                         fprintf(stderr, " [%u: %08X %08X]", c, vf[0], vf[1]);
                         uint32_t words = std::min<uint32_t>((vf[1] >> 2) & 0xFFFFFF, 128);
                         for (uint32_t i = 0; i < words; i++)
@@ -8147,7 +8341,7 @@ void main()
                 constantsOffset = at;
                 uint8_t* c = s_ringHost + at;
                 auto copyStage = [&](const Shader* packed, uint32_t base) {
-                    const uint32_t* src = &s_regs[XE_GPU_REG_SHADER_CONSTANT_000_X + base * 4];
+                    const uint32_t* src = StateWords(XE_GPU_REG_SHADER_CONSTANT_000_X + base * 4);
                     if (!packed)
                     {
                         memcpy(c + base * 16, src, 256 * 16);
@@ -8162,12 +8356,14 @@ void main()
                 copyStage(constLayoutPs, 256);  // pc.psConstBase
                 s_lastConstLayoutVs = constLayoutVs;
                 s_lastConstLayoutPs = constLayoutPs;
-                memcpy(c + 512 * 16, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], 48 * 16);
-                memcpy(c + 560 * 16, &s_regs[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031], 2 * 16);
-                memcpy(c + 562 * 16, &s_regs[XE_GPU_REG_SHADER_CONSTANT_LOOP_00], 8 * 16);
+                memcpy(c + 512 * 16, StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0, 192), 48 * 16);
+                memcpy(c + 560 * 16, StateWords(XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031, 8), 2 * 16);
+                memcpy(c + 562 * 16, StateWords(XE_GPU_REG_SHADER_CONSTANT_LOOP_00, 32), 8 * 16);
                 memset(c + 570 * 16, 0, 4 * 16);
                 memcpy(c + kTextureReciprocalOffset, textureReciprocal, sizeof(textureReciprocal));
                 memcpy(lastTextureReciprocal, textureReciprocal, sizeof(textureReciprocal));
+                memcpy(c + kVertexRoutesOffset, vertexRoutes, sizeof(vertexRoutes));
+                memcpy(lastVertexRoutes, vertexRoutes, sizeof(vertexRoutes));
                 s_lastConstantsOffset = at;
                 s_lastConstantsSubmission = s_submissionCounter;
                 s_stats.constantUploads++;
@@ -8220,6 +8416,46 @@ void main()
                 }
             }
             break;
+        }
+
+        uint32_t nativeOffsets[16] = {};
+        bool nativeShared[16] = {};
+        bool nativeGeometry=false;
+        if(s_nativeVertexInput && s_vs->info.nativeVertexEligible && !s_vs->info.usesMemExport && !s_ps->info.usesMemExport &&
+            key.primitiveMode==0 && !restart && (g_eagerWrites || s_shadowMode) && !s_vs->info.nativeAttributes.empty() &&
+            s_vs->info.nativeAttributes.size()<=s_nativeMaxAttributes) {
+            ++s_nativeVertexStats.candidates;
+            auto nativePrepareStart=std::chrono::steady_clock::now();
+            uint32_t first=0,last=vertexCount-1;
+            if(useIndices) {
+                first=UINT32_MAX;last=0;
+                for(uint32_t i=0;i<vertexCount;++i) {
+                    uint32_t v;
+                    if(!directIndices) v=indices[i];
+                    else if(indices16) { uint16_t x;memcpy(&x,s_ringHost+indexOffset+size_t(i)*2,2);v=x; }
+                    else memcpy(&v,s_ringHost+indexOffset+size_t(i)*4,4);
+                    first=std::min(first,v);last=std::max(last,v);
+                }
+                s_nativeVertexStats.indicesScanned+=vertexCount;
+            }
+            nativeGeometry=true;
+            for(uint32_t i=0;i<s_vs->info.nativeAttributes.size();++i) {
+                const auto& a=s_vs->info.nativeAttributes[i];
+                const uint32_t* vf=StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0+a.constant*2);
+                if(a.stride>s_nativeMaxStride || !s_nativeFormats[a.words-1] ||
+                    !gpu::native_vertex::Plan(a,vf[0],vf[1],copies,copyCount,first,last,
+                        StateWord(XE_GPU_REG_VGT_INDX_OFFSET),nativeOffsets[i],&nativeShared[i]) ||
+                    (nativeShared[i] && (writewatch::GpuWritePending(gpu::vertex_route::Base(vf[0]),gpu::vertex_route::Size(gpu::vertex_route::Base(vf[0]),vf[1])) ||
+                        writewatch::AnyGpuOwned(gpu::vertex_route::Base(vf[0]),gpu::vertex_route::Size(gpu::vertex_route::Base(vf[0]),vf[1]))))) { nativeGeometry=false;break; }
+            }
+            s_nativeVertexStats.prepareNs+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-nativePrepareStart).count();
+            if(nativeGeometry) {
+                PipelineKey nativeKey=key;nativeKey.nativeInput=1;
+                bool pending=false;
+                VkPipeline nativePipeline=GetPipeline(nativeKey,layout.pipeline,*s_vs,*s_ps,pending,true);
+                if(nativePipeline) { pipeline=nativePipeline;key=nativeKey; }
+                else { nativeGeometry=false;s_nativeVertexStats.pending+=pending; }
+            }
         }
 
         // The attachments' common size (the pass extent) and this draw's
@@ -8462,8 +8698,8 @@ void main()
                 // vertices are ePolys (32 bytes: x, y, z, colour, uv0, uv1;
                 // written at 0x82445DC8) at vertex fetch constant 95.
                 float c[16];
-                memcpy(c, &s_regs[XE_GPU_REG_SHADER_CONSTANT_000_X], sizeof(c));
-                const uint32_t* vf = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 95 * 2];
+                memcpy(c, StateWords(XE_GPU_REG_SHADER_CONSTANT_000_X), sizeof(c));
+                const uint32_t* vf = StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 95 * 2);
                 if (std::fabs(c[0] - feX) <= feX * 1e-5f && c[1] == 0.0f && c[2] == 0.0f &&
                     c[12] == 0.0f && c[13] == 0.0f && c[14] == 0.0f && c[15] == 1.0f && ((vf[0] & 3) == 3))
                 {
@@ -8552,7 +8788,7 @@ void main()
                     if (scan)
                     {
                         const uint32_t base = vf[0] & 0x1FFFFFFC, endian = vf[1] & 3;
-                        const uint32_t words = (vf[1] >> 2) & 0xFFFFFF, first = s_regs[XE_GPU_REG_VGT_INDX_OFFSET];
+                        const uint32_t words = (vf[1] >> 2) & 0xFFFFFF, first = StateWord(XE_GPU_REG_VGT_INDX_OFFSET);
                         for (uint32_t v0 = 0; v0 < count && valid && (fullWidth || measureY); v0 += per)
                         {
                             float lo = 1e30f, hi = -1e30f, loY = 1e30f, hiY = -1e30f;
@@ -8755,11 +8991,11 @@ void main()
                     // nothing inside the band changes.
                     // NFSMW_BAR_FILL=0 turns it off (an A/B switch).
                     static const bool barFill = [] { const char* v = std::getenv("NFSMW_BAR_FILL"); return !(v && v[0] == '0'); }();
-                    const uint32_t blend0 = s_regs[XE_GPU_REG_RB_BLENDCONTROL0] & 0x1FFF1FFF;
+                    const uint32_t blend0 = StateWord(XE_GPU_REG_RB_BLENDCONTROL0) & 0x1FFF1FFF;
                     if (barFill)
                     {
                         xenos::xe_gpu_texture_fetch_t t0;
-                        memcpy(&t0, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], sizeof(t0));
+                        memcpy(&t0, StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0), sizeof(t0));
                         const gpu::bars::Draw draw{ .prim = prim,
                             .count = count,
                             .c = c,
@@ -8780,7 +9016,7 @@ void main()
                             .scissor = { scissor.offset.x, scissor.offset.y, scissor.offset.x + int32_t(scissor.extent.width),
                                 scissor.offset.y + int32_t(scissor.extent.height) } };
                         const uint32_t base = vf[0] & 0x1FFFFFFC, endian = vf[1] & 3;
-                        const uint32_t words = (vf[1] >> 2) & 0xFFFFFF, first = s_regs[XE_GPU_REG_VGT_INDX_OFFSET];
+                        const uint32_t words = (vf[1] >> 2) & 0xFFFFFF, first = StateWord(XE_GPU_REG_VGT_INDX_OFFSET);
                         auto read = [&](uint32_t k, uint32_t j, uint32_t& word) {
                             const uint32_t v = src.Get(k) + first;  // an ePoly: 8 words
                             if ((v + 1) * 8 > words)
@@ -8834,7 +9070,7 @@ void main()
                         if (logFrontEnd && s_frame != last && s_frame != last + 1)
                         {
                             xenos::xe_gpu_texture_fetch_t t0;
-                            memcpy(&t0, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], sizeof(t0));
+                            memcpy(&t0, StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0), sizeof(t0));
                             fprintf(stderr, "[frontend] edge bars: matching from frame %llu: %s x %.3f..%.3f y %.3f..%.3f colour %08X blend %08X t0 %08X %ux%u, %u rect(s)\n",
                                 (unsigned long long)s_frame, backdrop ? "backdrop" : blackout ? "black frame" : kind == uint32_t(gpu::bars::Fill::RightBar) ? "right bar" : "left bar",
                                 box.x0, box.x1, box.y0, box.y1, barPlan.argb, blend0, (uint32_t(t0.base_address) << 12) & 0x1FFFFFFFu,
@@ -8868,7 +9104,7 @@ void main()
                             continue;
                         auto fetch = [](uint32_t n) {
                             xenos::xe_gpu_texture_fetch_t f;
-                            memcpy(&f, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6], sizeof(f));
+                            memcpy(&f, StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6), sizeof(f));
                             return f;
                         };
                         const xenos::xe_gpu_texture_fetch_t f0 = fetch(0), f1 = fetch(1);
@@ -8961,7 +9197,7 @@ void main()
                                 if (cover && (s_ps->info.texture2DMask & (1u << n)))
                                 {
                                     xenos::xe_gpu_texture_fetch_t f;
-                                    memcpy(&f, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6], sizeof(f));
+                                    memcpy(&f, StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6), sizeof(f));
                                     textures += std::format(" t{} {:08X} {}x{}", n, (uint32_t(f.base_address) << 12) & 0x1FFFFFFFu,
                                         uint32_t(f.size_2d.width) + 1, uint32_t(f.size_2d.height) + 1);
                                 }
@@ -8984,14 +9220,14 @@ void main()
             auto finiteValue = [](float value) { return std::isfinite(value) ? value : 0.0f; };
             std::string line = std::format("{{\"frame\":{},\"draw\":{},\"vs\":\"{:016x}\",\"ps\":\"{:016x}\",\"target\":[{},{}],\"viewport_transform\":[{},{},{},{},{},{}],\"scissor\":[{},{},{},{}],\"depth_control\":{},\"blend\":[{},{},{},{}],\"color_mask\":{},\"clip\":{},\"fetch\":[",
                 s_visual.frame, s_visual.draws, s_vs->hash, s_ps->hash, targetW, targetH,
-                finiteValue(sx), finiteValue(sy), finiteValue(sz), finiteValue(ox), finiteValue(oy), finiteValue(oz), x0, y0, x1, y1, s_regs[XE_GPU_REG_RB_DEPTHCONTROL],
-                s_regs[XE_GPU_REG_RB_BLENDCONTROL0], s_regs[XE_GPU_REG_RB_BLENDCONTROL1], s_regs[XE_GPU_REG_RB_BLENDCONTROL2], s_regs[XE_GPU_REG_RB_BLENDCONTROL3],
-                s_regs[XE_GPU_REG_RB_COLOR_MASK], s_regs[XE_GPU_REG_PA_CL_CLIP_CNTL]);
+                finiteValue(sx), finiteValue(sy), finiteValue(sz), finiteValue(ox), finiteValue(oy), finiteValue(oz), x0, y0, x1, y1, StateWord(XE_GPU_REG_RB_DEPTHCONTROL),
+                StateWord(XE_GPU_REG_RB_BLENDCONTROL0), StateWord(XE_GPU_REG_RB_BLENDCONTROL1), StateWord(XE_GPU_REG_RB_BLENDCONTROL2), StateWord(XE_GPU_REG_RB_BLENDCONTROL3),
+                StateWord(XE_GPU_REG_RB_COLOR_MASK), StateWord(XE_GPU_REG_PA_CL_CLIP_CNTL));
             bool comma = false;
             for (uint32_t n = 0; n < 32; ++n)
                 if ((s_ps->info.texture2DMask | s_ps->info.texture3DMask | s_ps->info.textureCubeMask) & (1u << n))
                 {
-                    const uint32_t* f = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6];
+                    const uint32_t* f = StateWords(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6);
                     if (comma) line += ","; comma = true;
                     line += std::format("{{\"slot\":{},\"words\":[{},{},{},{},{},{}]}}", n, f[0], f[1], f[2], f[3], f[4], f[5]);
                     s_visual.sampled.insert(f[1] & 0x1FFFF000u);
@@ -9005,7 +9241,7 @@ void main()
                 for (unsigned index = 0; index < 256 && recorded < 32; ++index)
                     if (info.constRelative || (info.constUsed[index / 64] & (1ull << (index % 64))))
                     {
-                        const uint32_t* c = &s_regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (stage * 256 + index) * 4];
+                        const uint32_t* c = StateWords(XE_GPU_REG_SHADER_CONSTANT_000_X + (stage * 256 + index) * 4);
                         if (comma) line += ","; comma = true;
                         line += std::format("{{\"stage\":{},\"index\":{},\"bits\":[{},{},{},{}]}}", stage, index, c[0], c[1], c[2], c[3]);
                         ++recorded;
@@ -9022,7 +9258,7 @@ void main()
                 targetW, targetH, sx, sy, ox, oy, x0, y0, x1, y1, vte.value & 0xFFF, s_vs->hash, s_ps->hash);
             for (uint32_t n = 0; n < 32; n++)
                 if ((s_ps->info.texture2DMask | s_ps->info.texture3DMask | s_ps->info.textureCubeMask) & (1u << n))
-                    line += std::format(" {}:{:08X}", n, (s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6 + 1] & 0x1FFFF000u));
+                    line += std::format(" {}:{:08X}", n, (StateWord(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6 + 1) & 0x1FFFF000u));
             if (barPlan.rectCount)
                 line += std::format(" +edge {} fill x{}", barPlan.fill == gpu::bars::Fill::Backdrop ? "backdrop"
                     : barPlan.fill == gpu::bars::Fill::Blackout ? "black frame" : "bar", barPlan.rectCount);
@@ -9041,7 +9277,7 @@ void main()
         }
         pc.vsConstBase = 0;
         pc.psConstBase = 256;
-        pc.indexOffset = s_regs[XE_GPU_REG_VGT_INDX_OFFSET];
+        pc.indexOffset = StateWord(XE_GPU_REG_VGT_INDX_OFFSET);
         auto colorControl = Reg<reg::RB_COLORCONTROL>();
         pc.alphaTest = colorControl.alpha_test_enable ? uint32_t(colorControl.alpha_func) : 7u;
         pc.alphaRef = RegF(XE_GPU_REG_RB_ALPHA_REF);
@@ -9080,12 +9316,12 @@ void main()
         }
         if (fresh || bound.pipeline != pipeline)
         {
-            vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            gpu::plume_rhi::BindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
             bound.pipeline = pipeline;
         }
         if (fresh || memcmp(&bound.viewport, &viewport, sizeof(viewport)) != 0)
         {
-            vkCmdSetViewport(s_cmd, 0, 1, &viewport);
+            gpu::plume_rhi::SetViewport(s_cmd, 0, 1, &viewport);
             bound.viewport = viewport;
         }
         // The scissor and the push constants are recorded through these, so
@@ -9093,11 +9329,11 @@ void main()
         // copies (below) change both, and a stale cache would skip the next
         // draw's own scissor and clip it to a fill rectangle.
         auto setScissor = [&](const VkRect2D& r) {
-            vkCmdSetScissor(s_cmd, 0, 1, &r);
+            gpu::plume_rhi::SetScissor(s_cmd, 0, 1, &r);
             bound.scissor = r;
         };
         auto pushConstants = [&](const DrawConstants& c) {
-            vkCmdPushConstants(s_cmd, layout.pipeline, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(c), &c);
+            gpu::plume_rhi::PushConstants(s_cmd, layout.pipeline, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(c), &c);
             bound.pc = c;
         };
         if (fresh || memcmp(&bound.scissor, &scissor, sizeof(scissor)) != 0)
@@ -9132,14 +9368,14 @@ void main()
         }
         if (fresh || memcmp(bound.bias, bias, sizeof(bias)) != 0)
         {
-            vkCmdSetDepthBias(s_cmd, bias[0], bias[1], bias[2]);
+            gpu::plume_rhi::SetDepthBias(s_cmd, bias[0], bias[1], bias[2]);
             memcpy(bound.bias, bias, sizeof(bias));
         }
 
         uint32_t dynamicOffset = uint32_t(constantsOffset);
         if (fresh || bound.setOffset != dynamicOffset)
         {
-            vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.pipeline, 0, 1, &s_set0, 1, &dynamicOffset);
+            gpu::plume_rhi::BindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.pipeline, 0, 1, &s_set0, 1, &dynamicOffset);
             bound.setOffset = dynamicOffset;
         }
 
@@ -9166,7 +9402,7 @@ void main()
                     bound.textures[i].imageLayout == writes[i].pImageInfo->imageLayout;
             if (!same)
             {
-                s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.pipeline, 1, writeCount, writes);
+                gpu::plume_rhi::PushDescriptors(s_pushDescriptorSet, s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.pipeline, 1, writeCount, writes);
                 bound.textureLayout = layout.pipeline;
                 bound.textureCount = writeCount;
                 for (uint32_t i = 0; i < writeCount; i++)
@@ -9235,19 +9471,29 @@ void main()
                 s_ps->info.usesKill, s_ps->info.writesDepth, s_ps->info.usesMemExport, s_vs->info.usesMemExport);
             if (useIndices) timed.indices += vertexCount; else timed.vertices += vertexCount;
             timed.snapshotDraws += copyCount != 0;
+            timed.nativeDraws += nativeGeometry;
             timed.snapshotRanges += copyCount; timed.snapshotBytes += copyBytes;
             timed.vs = s_vs->hash; timed.ps = s_ps->hash;
             timed.depthOnlyDraws += s_ps->hash == kDepthOnlyPsHash;
             timed.alphaDraws += pc.alphaTest != 7u;
         }
+        if(nativeGeometry) {
+            VkBuffer buffers[16];VkDeviceSize offsets[16];
+            for(uint32_t i=0;i<s_vs->info.nativeAttributes.size();++i) {
+                buffers[i]=nativeShared[i] ? s_shared : s_ring;
+                offsets[i]=(nativeShared[i] ? VkDeviceSize(0) : VkDeviceSize(pc.vfRedirect[0][2]))+nativeOffsets[i];
+            }
+            gpu::plume_rhi::BindVertexBuffers(s_cmd,0,uint32_t(s_vs->info.nativeAttributes.size()),buffers,offsets);
+            ++s_nativeVertexStats.draws;s_nativeVertexStats.attributes+=s_vs->info.nativeAttributes.size();
+        }
         if (useIndices)
         {
             vkCmdBindIndexBuffer(s_cmd, s_ring, indexOffset, indices16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(s_cmd, vertexCount, 1, 0, 0, 0);
+            gpu::plume_rhi::DrawIndexed(s_cmd, vertexCount, 1, 0, 0, 0);
         }
         else
         {
-            vkCmdDraw(s_cmd, vertexCount, 1, 0, 0);
+            gpu::plume_rhi::Draw(s_cmd, vertexCount, 1, 0, 0);
         }
         // Edge bars (above): the same draw again per rectangle, with the
         // stretched posScale and the rectangle as its scissor (inside this
@@ -9290,6 +9536,7 @@ void main()
                     auto& timed = s_timedSlots[s_slot].regions[s_timedPass];
                     ++timed.draws;
                     timed.snapshotDraws += copyCount != 0;
+            timed.nativeDraws += nativeGeometry;
                     timed.noFragmentDraws += (key.raster & 128u) != 0;
                     timed.eligibleDepthDraws += gpu::CanOmitFragmentStage(key.colorMask, alphaTest,
                         s_ps->info.usesKill, s_ps->info.writesDepth, s_ps->info.usesMemExport, s_vs->info.usesMemExport);
@@ -9298,9 +9545,9 @@ void main()
                     timed.alphaDraws += pc.alphaTest != 7u;
                 }
                 if (useIndices)
-                    vkCmdDrawIndexed(s_cmd, vertexCount, 1, 0, 0, 0);
+                    gpu::plume_rhi::DrawIndexed(s_cmd, vertexCount, 1, 0, 0, 0);
                 else
-                    vkCmdDraw(s_cmd, vertexCount, 1, 0, 0);
+                    gpu::plume_rhi::Draw(s_cmd, vertexCount, 1, 0, 0);
             }
         }
         if (s_submitAfterDraw)
@@ -9308,6 +9555,225 @@ void main()
             s_submitAfterDraw = false;
             SubmitRecorded(8);
         }
+    }
+
+    namespace {
+        void CheckNativeOwner()
+        {
+            if (!s_nativeMode || s_nativeOwner != std::this_thread::get_id())
+                throw std::logic_error("native operation outside renderer owner thread");
+        }
+        Shader* NativeShader(const std::shared_ptr<const game_shader::Resource>& resource, ShaderStage stage)
+        {
+            if (!resource) return nullptr;
+            if (!resource->id || resource->stage != stage || !resource->translated.ok)
+                throw std::invalid_argument("invalid native shader resource");
+            auto& entry = s_nativeShaders[resource.get()];
+            auto& shader = entry.second;
+            if (!shader) {
+                entry.first = resource;
+                shader = std::make_unique<Shader>();
+                shader->stage = stage;
+                shader->hash = game_shader::Hash(stage == ShaderStage::Vertex ? 0 : 1, resource->guestWords);
+                shader->info = resource->translated;
+            }
+            return shader.get();
+        }
+        void CheckNativeRect(const RenderTarget& target, uint32_t x, uint32_t y, uint32_t width, uint32_t height)
+        {
+            if (x > target.width || y > target.height || width > target.width-x || height > target.height-y)
+                throw std::out_of_range("native image rectangle");
+        }
+    }
+
+    bool InitializeNative()
+    {
+        if (s_vk) throw std::logic_error("cannot start a second renderer");
+        // Shares the presenter's existing device/loader, like Legacy/Plume.
+        // nullptr deliberately leaves no emulated register file available.
+        if (!InitializeImpl(nullptr,true)) return false;
+        if (!plume_rhi::Enabled()) throw std::logic_error("native renderer requires Plume Vulkan");
+        s_nativeOwner = std::this_thread::get_id();
+        s_nativeMode = true;
+        game_shader::PublishTranslationReady(true);
+        return true;
+    }
+
+    void NativeDraw(const native_render::Draw& draw)
+    {
+        CheckNativeOwner();
+        if (s_nativeDraw) throw std::logic_error("nested native draw");
+        if (draw.primitive > 63 || draw.endian > 3)
+            throw std::invalid_argument("invalid native draw arguments");
+        // Include all attached targets even when a shader/color mask currently
+        // does not write them. Targets are lazily allocated on this owner.
+        for (const auto& target : draw.state.colors) {
+            if (target.handle && target.depth) throw std::invalid_argument("depth target bound as color");
+            GetNativeTarget(target);
+        }
+        if (draw.state.depth.handle && !draw.state.depth.depth)
+            throw std::invalid_argument("color target bound as depth");
+        GetNativeTarget(draw.state.depth);
+        for (auto handle : draw.state.textures) {
+            if (!handle) continue;
+            if (!s_nativeTargets.contains(handle)) throw std::invalid_argument("unknown native sampled-image handle");
+            if (draw.state.depth.handle==handle || std::any_of(draw.state.colors.begin(),draw.state.colors.end(),
+                [=](const auto& target) { return target.handle==handle; }))
+                throw std::invalid_argument("native attachment feedback requires an explicit copy");
+        }
+        const auto mode=reg::RB_MODECONTROL{draw.state.rb_modecontrol}.edram_mode;
+        if (mode!=xenos::EdramMode::kColorDepth && mode!=xenos::EdramMode::kDepthOnly)
+            throw std::invalid_argument("native draw requires a graphics mode");
+        if (!draw.state.vertex || (mode==xenos::EdramMode::kColorDepth && !draw.state.pixel))
+            throw std::invalid_argument("native draw missing shader resource");
+        if (draw.state.vertex->translated.usesMemExport || (draw.state.pixel && draw.state.pixel->translated.usesMemExport))
+            throw std::invalid_argument("native memexport ownership not implemented");
+        if (mode==xenos::EdramMode::kColorDepth) for (uint32_t i=0;i<4;++i)
+            if ((draw.state.pixel->translated.colorTargetMask&(1u<<i)) &&
+                ((draw.state.rb_color_mask>>(i*4))&15) && !draw.state.colors[i].handle)
+                throw std::invalid_argument("native draw missing written color attachment");
+        s_vs = NativeShader(draw.state.vertex, ShaderStage::Vertex);
+        s_ps = NativeShader(draw.state.pixel, ShaderStage::Pixel);
+        struct Scope {
+            explicit Scope(const native_render::Draw& draw) { s_nativeDraw = &draw; }
+            ~Scope() { s_nativeDraw = nullptr; }
+        } scope(draw);
+        g_constantsDirty.store(true, std::memory_order_relaxed);
+        reg::VGT_DRAW_INITIATOR initiator{};
+        initiator.prim_type = xenos::PrimitiveType(draw.primitive);
+        initiator.source_select = draw.indexed ? xenos::SourceSelect::kDMA : xenos::SourceSelect::kAutoIndex;
+        initiator.index_size = draw.indices32 ? xenos::IndexFormat::kInt32 : xenos::IndexFormat::kInt16;
+        reg::VGT_DMA_SIZE dma{};
+        dma.swap_mode = xenos::Endian(draw.endian);
+        Draw(initiator.value, draw.indexBase, dma.value);
+    }
+
+    void NativeClear(const native_render::TargetDesc& desc, int32_t x, int32_t y,
+        uint32_t width, uint32_t height, const float color[4], float depth,
+        uint32_t stencil, bool clearDepth, bool clearStencil)
+    {
+        CheckNativeOwner();
+        auto* target = GetNativeTarget(desc);
+        if (!target || x < 0 || y < 0) throw std::invalid_argument("invalid native clear target/offset");
+        CheckNativeRect(*target, uint32_t(x), uint32_t(y), width, height);
+        if (!width || !height || (desc.depth && !clearDepth && !clearStencil)) return;
+        if (!desc.depth && !color) throw std::invalid_argument("missing native clear color");
+        RenderTarget* colors[4] = {desc.depth ? nullptr : target};
+        VkRect2D area{{x,y},{width,height}};
+        BeginPass(colors, desc.depth ? target : nullptr, area);
+        native_render::RecordClear(s_cmd,{target->image.image,target->vkFormat,target->width,target->height,target->depth},
+            uint32_t(x),uint32_t(y),width,height,color,std::clamp(depth,0.0f,1.0f),stencil,clearDepth,clearStencil);
+    }
+
+    void NativeCopy(const native_render::TargetDesc& source, const native_render::TargetDesc& dest,
+        uint32_t sourceX, uint32_t sourceY, uint32_t destX, uint32_t destY, uint32_t width, uint32_t height)
+    {
+        CheckNativeOwner();
+        if (!source.handle || !dest.handle || source.handle == dest.handle ||
+            source.depth != dest.depth || source.format != dest.format)
+            throw std::invalid_argument("native copy requires distinct compatible images");
+        auto* src = GetNativeTarget(source);
+        auto* dst = GetNativeTarget(dest);
+        CheckNativeRect(*src,sourceX,sourceY,width,height);
+        CheckNativeRect(*dst,destX,destY,width,height);
+        if (!width || !height) return;
+        FlushPendingClears(src);
+        FlushPendingClears(dst);
+        EndPass(); Begin(); FullBarrier();
+        int timing=TimingBegin("native_image_copy",width,height,0,source.format);
+        native_render::RecordCopy(s_cmd,{src->image.image,src->vkFormat,src->width,src->height,src->depth},
+            {dst->image.image,dst->vkFormat,dst->width,dst->height,dst->depth},
+            sourceX,sourceY,destX,destY,width,height);
+        TimingEnd(timing); FullBarrier();
+    }
+
+    void NativeDestroyTarget(uint64_t handle)
+    {
+        CheckNativeOwner();
+        auto it=s_nativeTargets.find(handle);
+        if (it==s_nativeTargets.end()) return;
+        FlushPendingClears(it->second.get());
+        // Correct retirement first; replace with submission-owned deferred
+        // deletion once game object lifetime hooks are connected.
+        Flush();
+        for (auto [swizzle,view] : it->second->nativeViews) s_textureViewExtents.erase(view);
+        for (auto& color : s_passColor) if (color==it->second.get()) color=nullptr;
+        if (s_passDepth==it->second.get()) s_passDepth=nullptr;
+        DestroyTarget(*it->second);
+        s_nativeTargets.erase(it);
+        ++s_stateEpoch;
+    }
+
+    std::vector<uint8_t> NativeReadback(const native_render::TargetDesc& desc,
+        uint32_t x, uint32_t y, uint32_t width, uint32_t height, bool stencil)
+    {
+        CheckNativeOwner();
+        auto* target=GetNativeTarget(desc);
+        if (!target || (stencil && !target->depth)) throw std::invalid_argument("invalid native readback target/aspect");
+        CheckNativeRect(*target,x,y,width,height);
+        if (!width || !height) return {};
+        native_render::ImageRegion region{target->image.image,target->vkFormat,target->width,target->height,target->depth};
+        const uint32_t bytesPerPixel=native_render::ReadbackBytesPerPixel(region,stencil);
+        const uint64_t size=uint64_t(width)*height*bytesPerPixel;
+        if (size>64*1024*1024) throw std::length_error("native readback exceeds 64 MiB budget");
+        std::vector<uint8_t> result(size_t(size),0);
+        // A dedicated, bounded allocation prevents the draw upload ring from
+        // being recycled while CPU readback consumes this submission.
+        struct Readback {
+            VkBuffer buffer=VK_NULL_HANDLE;
+            VkDeviceMemory memory=VK_NULL_HANDLE;
+            void* mapped=nullptr;
+            ~Readback() {
+                if(mapped) vkUnmapMemory(s_dev,memory);
+                if(buffer) vkDestroyBuffer(s_dev,buffer,nullptr);
+                if(memory) vkFreeMemory(s_dev,memory,nullptr);
+            }
+        } read;
+        VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};info.size=result.size();info.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        Check(vkCreateBuffer(s_dev,&info,nullptr,&read.buffer),"vkCreateBuffer(native readback)");
+        VkMemoryRequirements requirements;vkGetBufferMemoryRequirements(s_dev,read.buffer,&requirements);
+        VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};allocation.allocationSize=requirements.size;
+        allocation.memoryTypeIndex=FindMemoryType(requirements.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+        Check(vkAllocateMemory(s_dev,&allocation,nullptr,&read.memory),"vkAllocateMemory(native readback)");
+        Check(vkBindBufferMemory(s_dev,read.buffer,read.memory,0),"vkBindBufferMemory(native readback)");
+        Check(vkMapMemory(s_dev,read.memory,0,VK_WHOLE_SIZE,0,&read.mapped),"vkMapMemory(native readback)");
+        FlushPendingClears(target);EndPass();Begin();FullBarrier();
+        int timing=TimingBegin("native_cpu_readback",width,height,0,desc.format);
+        native_render::RecordReadback(s_cmd,region,read.buffer,result.size(),x,y,width,height,stencil);
+        VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};host.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;host.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(s_cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&host,0,nullptr,0,nullptr);
+        TimingEnd(timing);Flush();
+        // Invalidate even on coherent heaps: valid there too, and correctly
+        // handles devices whose host-visible readback heap isn't coherent.
+        VkMappedMemoryRange mapped{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};mapped.memory=read.memory;mapped.size=VK_WHOLE_SIZE;
+        Check(vkInvalidateMappedMemoryRanges(s_dev,1,&mapped),"vkInvalidateMappedMemoryRanges(native readback)");
+        memcpy(result.data(),read.mapped,result.size());
+        return result;
+    }
+
+    bool NativePresent(const native_render::TargetDesc& desc, uint32_t width, uint32_t height)
+    {
+        CheckNativeOwner();
+        auto* source=GetNativeTarget(desc);
+        if (!source || source->depth || source->vkFormat!=VK_FORMAT_R8G8B8A8_UNORM || !width || !height)
+            throw std::invalid_argument("native presentation currently requires RGBA8 color");
+        CheckNativeRect(*source,0,0,width,height);
+        if (s_nativeFrontWidth!=width || s_nativeFrontHeight!=height) {
+            DestroyFrontImage(s_nativeFront,s_nativeFrontWidth,s_nativeFrontHeight);
+            s_nativeFront=CreateImage(VK_IMAGE_TYPE_2D,VK_FORMAT_R8G8B8A8_UNORM,{width,height,1},1,
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK_IMAGE_VIEW_TYPE_2D,VK_IMAGE_ASPECT_COLOR_BIT);
+            Begin();ToGeneral(s_nativeFront.image,VK_IMAGE_ASPECT_COLOR_BIT,1);
+            s_nativeFrontWidth=width;s_nativeFrontHeight=height;
+        }
+        FlushPendingClears(source);EndPass();Begin();
+        FullBarrier(); // includes the presenter's previous read on the shared queue
+        int timing=TimingBegin("native_front_copy",width,height,0,desc.format);
+        native_render::RecordCopy(s_cmd,{source->image.image,source->vkFormat,source->width,source->height,false},
+            {s_nativeFront.image,VK_FORMAT_R8G8B8A8_UNORM,width,height,false},0,0,0,0,width,height);
+        TimingEnd(timing);FullBarrier();SubmitRecorded(7);
+        video::SubmitFrontImage(s_nativeFront.image,width,height,width,height);
+        return true;
     }
 
     void Submit()
@@ -9573,12 +10039,12 @@ void main()
             { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 3, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &table, nullptr },
         };
         s_stateEpoch++;
-        vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_frontPipeline);
-        s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_frontLayout, 0, AddSharedParts(w, 4), w);
-        vkCmdPushConstants(s_cmd, s_frontLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        gpu::plume_rhi::BindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_frontPipeline);
+        gpu::plume_rhi::PushDescriptors(s_pushDescriptorSet, s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_frontLayout, 0, AddSharedParts(w, 4), w);
+        gpu::plume_rhi::PushConstants(s_cmd, s_frontLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
         {
             int timed = TimingBegin("front_compute", outW, outH);
-            vkCmdDispatch(s_cmd, (outW + 7) / 8, (outH + 7) / 8, 1);
+            gpu::plume_rhi::Dispatch(s_cmd, (outW + 7) / 8, (outH + 7) / 8, 1);
             TimingEnd(timed);
         }
         GuardGpu(pc.base, frontBytes, false, "front buffer");
@@ -9672,6 +10138,27 @@ void main()
 
     void OnSwap(uint64_t frame)
     {
+        if (frame % 120 == 0) {
+            const auto gs=game_shader::GetLibrary().GetStats();
+            fprintf(stderr,"[game-shaders] enabled=%d created=%llu reused=%llu pipeline_sources=%llu rejected=%llu bytes=%zu (cumulative; PM4 draw/state/EDRAM remain)\n",
+                game_shader::Enabled(),(unsigned long long)gs.created,(unsigned long long)gs.reused,
+                (unsigned long long)gs.hits,(unsigned long long)gs.rejected,gs.bytes);
+            const auto& nv=s_nativeVertexStats;
+            fprintf(stderr,"[native-geometry] candidates=%llu draws=%llu attributes=%llu scanned_indices=%llu optional_pipeline_pending=%llu prepare_us=%llu (cumulative; game command processor still active)\n",
+                (unsigned long long)nv.candidates,(unsigned long long)nv.draws,(unsigned long long)nv.attributes,
+                (unsigned long long)nv.indicesScanned,(unsigned long long)nv.pending,(unsigned long long)(nv.prepareNs/1000));
+            const auto& vr = s_vertexRouteStats;
+            fprintf(stderr, "[vertex-route] enabled=%d draws=%llu snapshot_routes=%llu shared_routes=%llu fallback_routes=%llu metadata_changes=%llu (cumulative declared fetch ranges, not GPU hits)\n",
+                gpu::g_vertexRoutingEnabled, (unsigned long long)vr.draws, (unsigned long long)vr.snapshots,
+                (unsigned long long)vr.shared, (unsigned long long)vr.fallback, (unsigned long long)vr.changes);
+        }
+        if (gpu::plume_rhi::Enabled() && frame % 120 == 0) {
+            auto c = gpu::plume_rhi::GetCounters();
+            fprintf(stderr, "[plume] frame=%llu passes=%llu draws=%llu indexed=%llu dispatches=%llu graphics_pipelines=%llu compute_pipelines=%llu descriptors=%llu images=%llu (cumulative)\n",
+                (unsigned long long)frame, (unsigned long long)c.passes, (unsigned long long)c.draws,
+                (unsigned long long)c.indexedDraws, (unsigned long long)c.dispatches,
+                (unsigned long long)c.graphicsPipelines, (unsigned long long)c.computePipelines, (unsigned long long)c.descriptors, (unsigned long long)c.images);
+        }
 #ifdef __ANDROID__
         // Bounded aggregate evidence, no images or guest data. GPU interval
         // totals are asynchronous completed submissions, not per-frame times.
@@ -10154,13 +10641,14 @@ void main()
             m.targets += rt->image.bytes;
             m.targetCount++;
         }
+        for (const auto& [key, rt] : s_nativeTargets) { m.targets += rt->image.bytes; m.targetCount++; }
         for (const auto& [key, t] : s_textures)
         {
             m.textures += t->image.bytes;
             m.textureCount++;
         }
         m.scaled = s_scaled.poolBytes + s_scaled.tableBytes + s_scaled.scratchBytes;
-        m.front = s_front.bytes + s_frontScaled.bytes;
+        m.front = s_front.bytes + s_frontScaled.bytes + s_nativeFront.bytes;
         auto own = [&m](const Image& image) {
             if (image.memory && !image.block)
             {
@@ -10170,9 +10658,11 @@ void main()
         };
         for (const auto& [key, rt] : s_targets)
             own(rt->image);
+        for (const auto& [key, rt] : s_nativeTargets)
+            own(rt->image);
         for (const auto& [key, t] : s_textures)
             own(t->image);
-        for (const Image* image : { &s_front, &s_frontScaled, &s_dummy[0], &s_dummy[1], &s_dummy[2], &s_dummyStorage })
+        for (const Image* image : { &s_front, &s_frontScaled, &s_nativeFront, &s_dummy[0], &s_dummy[1], &s_dummy[2], &s_dummyStorage })
             own(*image);
         for (const auto& block : s_blocks)
         {

@@ -1,0 +1,279 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index a09dd93..bdb9cd1 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -6,7 +6,9 @@
+ //
+ 
+ #define VMA_IMPLEMENTATION
+-#define VOLK_IMPLEMENTATION 
++#ifndef PLUME_EXTERNAL_VOLK
++#define VOLK_IMPLEMENTATION
++#endif
+ 
+ #include "plume_vulkan.h"
+ 
+@@ -1271,6 +1273,7 @@ namespace plume {
+     }
+ 
+     VulkanPipelineLayout::~VulkanPipelineLayout() {
++        if (!device) return; // borrowed native object
+         if (vk != VK_NULL_HANDLE) {
+             vkDestroyPipelineLayout(device->vk, vk, nullptr);
+         }
+@@ -1398,6 +1401,7 @@ namespace plume {
+     }
+ 
+     VulkanComputePipeline::~VulkanComputePipeline() {
++        if (!device) return; // borrowed native object
+         if (vk != VK_NULL_HANDLE) {
+             vkDestroyPipeline(device->vk, vk, nullptr);
+         }
+@@ -1657,6 +1661,7 @@ namespace plume {
+     }
+ 
+     VulkanGraphicsPipeline::~VulkanGraphicsPipeline() {
++        if (!device) return; // borrowed native object
+         if (vk != VK_NULL_HANDLE) {
+             vkDestroyPipeline(device->vk, vk, nullptr);
+         }
+@@ -2789,6 +2794,7 @@ namespace plume {
+     }
+ 
+     VulkanCommandList::~VulkanCommandList() {
++        if (!queue) return; // borrowed command buffer; caller retires its fence
+         if (vk != VK_NULL_HANDLE) {
+             vkFreeCommandBuffers(queue->device->vk, commandPool, 1, &vk);
+         }
+@@ -2837,8 +2843,10 @@ namespace plume {
+ 
+         endActiveRenderPass();
+ 
+-        const bool geometryEnabled = queue->device->capabilities.geometryShader;
+-        const bool rtEnabled = queue->device->capabilities.raytracing;
++        const VulkanDevice *barrierDevice = queue ? queue->device : externalDevice;
++        assert(barrierDevice != nullptr);
++        const bool geometryEnabled = barrierDevice->capabilities.geometryShader;
++        const bool rtEnabled = barrierDevice->capabilities.raytracing;
+         VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+         VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT | toStageFlags(stages, geometryEnabled, rtEnabled);
+         thread_local std::vector<VkBufferMemoryBarrier> bufferMemoryBarriers;
+@@ -3473,6 +3481,7 @@ namespace plume {
+     }
+ 
+     void VulkanCommandList::checkActiveRenderPass() {
++        if (externalRendering) return;
+         assert(targetFramebuffer != nullptr);
+         
+         if (activeRenderPass == VK_NULL_HANDLE) {
+@@ -3488,6 +3497,7 @@ namespace plume {
+     }
+ 
+     void VulkanCommandList::endActiveRenderPass() {
++        if (externalRendering) endVulkanRendering();
+         if (activeRenderPass != VK_NULL_HANDLE) {
+             vkCmdEndRenderPass(vk);
+             activeRenderPass = VK_NULL_HANDLE;
+@@ -4162,6 +4172,99 @@ namespace plume {
+         }
+     }
+ 
++    VulkanDevice::VulkanDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice device, uint32_t queueFamily) {
++        ownsDevice = false;
++        vk = device;
++        physicalDevice = physical;
++        queueFamilyIndices[0] = queueFamilyIndices[1] = queueFamilyIndices[2] = queueFamily;
++        vkGetPhysicalDeviceProperties(physical, &physicalDeviceProperties);
++        VmaVulkanFunctions vmaFunctions = {};
++        vmaFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
++        vmaFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
++        vmaFunctions.vkAllocateMemory = vkAllocateMemory;
++        vmaFunctions.vkBindBufferMemory = vkBindBufferMemory;
++        vmaFunctions.vkBindImageMemory = vkBindImageMemory;
++        vmaFunctions.vkCreateBuffer = vkCreateBuffer;
++        vmaFunctions.vkCreateImage = vkCreateImage;
++        vmaFunctions.vkDestroyBuffer = vkDestroyBuffer;
++        vmaFunctions.vkDestroyImage = vkDestroyImage;
++        vmaFunctions.vkFlushMappedMemoryRanges = vkFlushMappedMemoryRanges;
++        vmaFunctions.vkFreeMemory = vkFreeMemory;
++        vmaFunctions.vkGetBufferMemoryRequirements = vkGetBufferMemoryRequirements;
++        vmaFunctions.vkGetImageMemoryRequirements = vkGetImageMemoryRequirements;
++        vmaFunctions.vkGetPhysicalDeviceMemoryProperties = vkGetPhysicalDeviceMemoryProperties;
++        vmaFunctions.vkGetPhysicalDeviceProperties = vkGetPhysicalDeviceProperties;
++        vmaFunctions.vkInvalidateMappedMemoryRanges = vkInvalidateMappedMemoryRanges;
++        vmaFunctions.vkMapMemory = vkMapMemory;
++        vmaFunctions.vkUnmapMemory = vkUnmapMemory;
++        vmaFunctions.vkCmdCopyBuffer = vkCmdCopyBuffer;
++
++
++        VmaAllocatorCreateInfo info{};
++        info.preferredLargeHeapBlockSize = 32ull * 1024 * 1024;
++        info.instance = instance; info.physicalDevice = physical; info.device = device;
++        info.vulkanApiVersion = VK_API_VERSION_1_2;
++        info.pVulkanFunctions = &vmaFunctions;
++        // No optional feature is assumed enabled on a borrowed VkDevice.
++        if (vmaCreateAllocator(&info, &allocator) != VK_SUCCESS) vk = VK_NULL_HANDLE;
++        capabilities.maxTextureSize = physicalDeviceProperties.limits.maxImageDimension2D;
++        capabilities.dynamicDepthBias = true;
++    }
++
++    VkResult VulkanDevice::createVulkanGraphicsPipelines(VkPipelineCache cache, uint32_t count,
++        const VkGraphicsPipelineCreateInfo *infos, const VkAllocationCallbacks *callbacks, VkPipeline *pipelines) {
++        return vkCreateGraphicsPipelines(vk, cache, count, infos, callbacks, pipelines);
++    }
++
++    VkResult VulkanDevice::createVulkanComputePipelines(VkPipelineCache cache, uint32_t count,
++        const VkComputePipelineCreateInfo *infos, const VkAllocationCallbacks *callbacks, VkPipeline *pipelines) {
++        return vkCreateComputePipelines(vk, cache, count, infos, callbacks, pipelines);
++    }
++
++    void VulkanCommandList::resetExternalState() {
++        assert(queue == nullptr && !externalRendering && activeRenderPass == VK_NULL_HANDLE);
++        targetFramebuffer = nullptr;
++        activeGraphicsPipelineLayout = activeComputePipelineLayout = activeRaytracingPipelineLayout = nullptr;
++    }
++
++    void VulkanCommandList::beginVulkanRendering(const VkRenderingInfoKHR &info) {
++        assert(!externalRendering && activeRenderPass == VK_NULL_HANDLE);
++        vkCmdBeginRenderingKHR(vk, &info);
++        externalRendering = true;
++    }
++
++    void VulkanCommandList::endVulkanRendering() {
++        assert(externalRendering);
++        vkCmdEndRenderingKHR(vk);
++        externalRendering = false;
++    }
++
++    void VulkanCommandList::bindVulkanDescriptorSets(VkPipelineBindPoint bindPoint, VkPipelineLayout layout,
++        uint32_t firstSet, uint32_t count, const VkDescriptorSet *sets, uint32_t offsetCount, const uint32_t *offsets) {
++        vkCmdBindDescriptorSets(vk, bindPoint, layout, firstSet, count, sets, offsetCount, offsets);
++    }
++
++    void VulkanCommandList::pushVulkanDescriptors(PFN_vkCmdPushDescriptorSetKHR push, VkPipelineBindPoint bindPoint,
++        VkPipelineLayout layout, uint32_t set, uint32_t count, const VkWriteDescriptorSet *writes) {
++        assert(push != nullptr);
++        push(vk, bindPoint, layout, set, count, writes);
++    }
++
++    VkResult VulkanDevice::allocateVulkanImage(const VkImageCreateInfo &info, VkImage *image, VmaAllocation *allocation, VmaAllocationInfo *allocationInfo) {
++        VmaAllocationCreateInfo allocationDesc{};
++        allocationDesc.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
++        return vmaCreateImage(allocator, &info, &allocationDesc, image, allocation, allocationInfo);
++    }
++
++    void VulkanDevice::freeVulkanImage(VkImage image, VmaAllocation allocation) {
++        vmaDestroyImage(allocator, image, allocation);
++    }
++
++    VkResult VulkanDevice::submitVulkanQueue(VkQueue queue, uint32_t count, const VkSubmitInfo *infos, VkFence fence) {
++        // External caller holds its existing queue mutex and foreground gate.
++        return vkQueueSubmit(queue,count,infos,fence);
++    }
++
+     VulkanDevice::~VulkanDevice() {
+         release();
+     }
+@@ -4191,6 +4294,7 @@ namespace plume {
+     }
+ 
+     std::unique_ptr<RenderCommandQueue> VulkanDevice::createCommandQueue(RenderCommandListType type) {
++        if (!ownsDevice) return nullptr; // caller owns queue synchronization
+         return std::make_unique<VulkanCommandQueue>(this, type);
+     }
+ 
+@@ -4444,7 +4548,7 @@ namespace plume {
+         }
+ 
+         if (vk != VK_NULL_HANDLE) {
+-            vkDestroyDevice(vk, nullptr);
++            if (ownsDevice) vkDestroyDevice(vk, nullptr);
+             vk = VK_NULL_HANDLE;
+         }
+     }
+diff --git a/plume_vulkan.h b/plume_vulkan.h
+index 1d36b12..82ff422 100644
+--- a/plume_vulkan.h
++++ b/plume_vulkan.h
+@@ -17,7 +17,9 @@
+ #if defined(_WIN32)
+ #define VK_USE_PLATFORM_WIN32_KHR
+ #elif defined(__ANDROID__)
++#ifndef VK_USE_PLATFORM_ANDROID_KHR
+ #define VK_USE_PLATFORM_ANDROID_KHR
++#endif
+ #elif defined(__linux__) && !defined(PLUME_SDL_VULKAN_ENABLED)
+ #define VK_USE_PLATFORM_XLIB_KHR
+ #elif defined(__APPLE__)
+@@ -26,7 +28,9 @@
+ #endif
+ 
+ // For VK_KHR_portability_subset
++#ifndef VK_ENABLE_BETA_EXTENSIONS
+ #define VK_ENABLE_BETA_EXTENSIONS
++#endif
+ 
+ #include <volk.h>
+ 
+@@ -134,6 +138,8 @@ namespace plume {
+         std::vector<VulkanDescriptorSetLayout *> descriptorSetLayouts;
+         VulkanDevice *device = nullptr;
+ 
++        // Borrowed native layout: the caller retains ownership and lifetime.
++        explicit VulkanPipelineLayout(VkPipelineLayout layout) : vk(layout) {}
+         VulkanPipelineLayout(VulkanDevice *device, const RenderPipelineLayoutDesc &desc);
+         ~VulkanPipelineLayout() override;
+     };
+@@ -176,6 +182,7 @@ namespace plume {
+         VkPipeline vk = VK_NULL_HANDLE;
+         VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+ 
++        explicit VulkanComputePipeline(VkPipeline pipeline) : VulkanPipeline(nullptr, Type::Compute), vk(pipeline) {}
+         VulkanComputePipeline(VulkanDevice *device, const RenderComputePipelineDesc &desc);
+         ~VulkanComputePipeline() override;
+         void setName(const std::string &name) override;
+@@ -186,6 +193,7 @@ namespace plume {
+         VkPipeline vk = VK_NULL_HANDLE;
+         VkRenderPass renderPass = VK_NULL_HANDLE;
+ 
++        explicit VulkanGraphicsPipeline(VkPipeline pipeline) : VulkanPipeline(nullptr, Type::Graphics), vk(pipeline) {}
+         VulkanGraphicsPipeline(VulkanDevice *device, const RenderGraphicsPipelineDesc &desc);
+         ~VulkanGraphicsPipeline() override;
+         void setName(const std::string &name) override;
+@@ -303,6 +311,18 @@ namespace plume {
+         const VulkanPipelineLayout *activeRaytracingPipelineLayout = nullptr;
+         VkRenderPass activeRenderPass = VK_NULL_HANDLE;
+ 
++        // Interoperability with an already-recording command buffer. No pool,
++        // buffer, queue, device or dispatch ownership is acquired.
++        explicit VulkanCommandList(VkCommandBuffer commandBuffer, VulkanDevice *externalDevice = nullptr) : vk(commandBuffer), externalDevice(externalDevice) {}
++        VulkanDevice *externalDevice = nullptr;
++        void resetExternalState();
++        void beginVulkanRendering(const VkRenderingInfoKHR &info);
++        void endVulkanRendering();
++        void bindVulkanDescriptorSets(VkPipelineBindPoint bindPoint, VkPipelineLayout layout, uint32_t firstSet,
++            uint32_t count, const VkDescriptorSet *sets, uint32_t offsetCount, const uint32_t *offsets);
++        void pushVulkanDescriptors(PFN_vkCmdPushDescriptorSetKHR push, VkPipelineBindPoint bindPoint,
++            VkPipelineLayout layout, uint32_t set, uint32_t count, const VkWriteDescriptorSet *writes);
++        bool externalRendering = false;
+         VulkanCommandList(VulkanCommandQueue *queue);
+         ~VulkanCommandList() override;
+         void begin() override;
+@@ -418,6 +438,17 @@ namespace plume {
+         bool loadStoreOpNoneSupported = false;
+         bool nullDescriptorSupported = false;
+ 
++        // Does not initialize Volk, create an instance/device/queue or enable features.
++        // Resources use a private VMA allocator on the caller's existing device.
++        VulkanDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice device, uint32_t queueFamily);
++        VkResult createVulkanGraphicsPipelines(VkPipelineCache cache, uint32_t count,
++            const VkGraphicsPipelineCreateInfo *infos, const VkAllocationCallbacks *callbacks, VkPipeline *pipelines);
++        VkResult createVulkanComputePipelines(VkPipelineCache cache, uint32_t count,
++            const VkComputePipelineCreateInfo *infos, const VkAllocationCallbacks *callbacks, VkPipeline *pipelines);
++        VkResult allocateVulkanImage(const VkImageCreateInfo &info, VkImage *image, VmaAllocation *allocation, VmaAllocationInfo *allocationInfo);
++        void freeVulkanImage(VkImage image, VmaAllocation allocation);
++        VkResult submitVulkanQueue(VkQueue queue, uint32_t count, const VkSubmitInfo *infos, VkFence fence);
++        bool ownsDevice = true;
+         VulkanDevice(VulkanInterface *renderInterface, const std::string &preferredDeviceName);
+         ~VulkanDevice() override;
+         std::unique_ptr<RenderDescriptorSet> createDescriptorSet(const RenderDescriptorSetDesc &desc) override;

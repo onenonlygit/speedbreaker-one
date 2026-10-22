@@ -8,7 +8,7 @@ command -v adb >/dev/null || { echo 'Install Android platform-tools first.' >&2;
 adb connect "$SERIAL"
 adb -s "$SERIAL" get-state
 if [[ -n "$APK" ]]; then adb -s "$SERIAL" install -r "$APK"; fi
-OUT="${SB_CAPTURE_DIR:-$PWD/SpeedBreaker-0.1.11-$(date +%Y%m%d-%H%M%S)}"
+OUT="${SB_CAPTURE_DIR:-$PWD/SpeedBreaker-0.1.14-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUT"
 adb -s "$SERIAL" shell am force-stop "$PACKAGE"
 adb -s "$SERIAL" logcat -c
@@ -19,11 +19,13 @@ trap cleanup EXIT
 adb -s "$SERIAL" exec-out run-as "$PACKAGE" cat files/data/speedbreaker/settings.toml > "$OUT/settings-before.toml" 2>/dev/null || true
 adb -s "$SERIAL" shell dumpsys package "$PACKAGE" > "$OUT/package.txt"
 adb -s "$SERIAL" exec-out run-as "$PACKAGE" cat shared_prefs/gpu_driver.xml > "$OUT/driver-selection.xml" 2>/dev/null || true
+adb -s "$SERIAL" exec-out run-as "$PACKAGE" cat shared_prefs/render_backend.xml > "$OUT/backend-before.xml" 2>/dev/null || true
 adb -s "$SERIAL" shell am start -n "$PACKAGE/.LauncherActivity"
-printf '\n0.1.11: automatic per-pass GPU timestamps, no recording/readback.\nChoose the driver on the launch screen and press Play.\nUse 720p / Frame Rate 60; keep GPU Scheduling and Work Reduction unchanged.\nKeep Shader Predicate Coalescing and Depth Stage Reduction ON for the first run.\nFor rollback comparisons switch one OFF, then restart from the launch screen.\nWarm up for 60 seconds, then drive the same Quick Race for 2 minutes.\nNote FPS, GPU usage and hitches. Start a second race.\nOptional shader check: switch Advanced > Asynchronous Shaders OFF (live),\nthen repeat the same warmed race and note whether the hitches change.\nThe first encounter may compile shaders; compare warmed runs.\nType done when finished. The collector will press Home and wait 10 seconds,\nthen package the pass timings, shader diagnostics and background logs.\n\n'
+printf '\n0.1.14: automatic per-pass GPU timestamps, no recording/readback.\nChoose the driver on the launch screen and press Play.\nUse 720p / Frame Rate 60; keep GPU Scheduling and Work Reduction unchanged.\nKeep Vertex Memory Routing, Shader Predicate Coalescing and Depth Stage Reduction ON for the first run.\nFor rollback comparisons switch one OFF, then restart from the launch screen.\nWarm up for 60 seconds, then drive the same Quick Race for 2 minutes.\nNote FPS, GPU usage and hitches. Start a second race.\nOptional shader check: switch Advanced > Asynchronous Shaders OFF (live),\nthen repeat the same warmed race and note whether the hitches change.\nThe first encounter may compile shaders; compare warmed runs.\nType done when finished. The collector will press Home and wait 10 seconds,\nthen package the pass timings, shader diagnostics and background logs.\n\n'
 IFS= read -r -t 600 ANSWER || true
 adb -s "$SERIAL" exec-out run-as "$PACKAGE" cat files/data/speedbreaker/settings.toml > "$OUT/settings-after.toml" 2>/dev/null || true
 adb -s "$SERIAL" exec-out run-as "$PACKAGE" cat shared_prefs/gpu_driver.xml > "$OUT/driver-selection-after.xml" 2>/dev/null || true
+adb -s "$SERIAL" exec-out run-as "$PACKAGE" cat shared_prefs/render_backend.xml > "$OUT/backend-after.xml" 2>/dev/null || true
 adb -s "$SERIAL" shell dumpsys cpuinfo > "$OUT/cpu-before-home.txt" || true
 adb -s "$SERIAL" shell input keyevent KEYCODE_HOME
 sleep 10

@@ -4,6 +4,40 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## v0.1.15 (2026-10-19)
+
+- Create host-owned shader resources at the game's graphics calls, retaining
+  original identity and immutable declaration-patched variants.
+- Pipeline creation can reuse those translations; Game Shader Resources in
+  Advanced provides a restart-bound rollback.
+- Native-renderer development checkpoint. PM4 draw/state and EDRAM handling
+  remain; no racing performance gain or completed native backend is claimed.
+
+## v0.1.14 (2026-10-19)
+
+- First native geometry slice: hardware vertex attributes for supported draws,
+  with proven ranges and compatibility fallback.
+- Native Vertex Input rollback, per-pass native coverage and CPU preparation logs.
+- Full game-native rendering remains in progress: PM4 and EDRAM paths are still
+  active. No measured RP6 speedup is claimed.
+
+## v0.1.13 (2026-10-19)
+
+- Precomputed vertex-memory routes share address selection across an attribute,
+  retaining exact per-word fallback for overlaps and unusual accesses.
+- Restart-bound Vertex Memory Routing rollback and route-coverage diagnostics.
+- Preserves graphics quality, custom EDRAM handling and backend selection.
+  RP6 performance improvement remains unverified.
+
+## v0.1.12 (2026-10-19)
+
+- Optional Plume Vulkan backend: game render-pass scopes, pipeline creation,
+  draw/compute recording, descriptors, queue submissions and image allocation.
+- One shared Vulkan loader/device/queue; original Xenos shaders, resolves,
+  synchronization and timing retained.
+- Backend selection on the launch screen and in Advanced. Legacy Vulkan remains
+  available; no RP6 performance improvement is established by this migration.
+
 ## v0.1.11 (2026-10-16)
 
 - Android GPU driver launch selector: import ARM64 Turnip ZIPs, retain multiple

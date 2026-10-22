@@ -27,6 +27,8 @@
 #include <string>
 #include <vector>
 
+namespace gpu::native_render { struct Draw; struct TargetDesc; }
+
 namespace gpu::renderer
 {
     // `regs` is the command processor's register file (host order). Returns
@@ -40,6 +42,25 @@ namespace gpu::renderer
     // DRAW_INDX / DRAW_INDX_2 (VGT_DRAW_INITIATOR, and VGT_DMA_BASE/SIZE for
     // indexed draws). In copy mode this is a resolve.
     void Draw(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize);
+
+    // Native entry points, exclusively on the renderer owner thread. No PM4
+    // decoder/register array is created. Not a selectable game backend until
+    // all game resource/fence/presentation contracts are connected.
+    bool InitializeNative();
+    void NativeDraw(const native_render::Draw& draw);
+    void NativeClear(const native_render::TargetDesc& target, int32_t x, int32_t y,
+        uint32_t width, uint32_t height, const float color[4], float depth,
+        uint32_t stencil, bool clearDepth = true, bool clearStencil = true);
+    void NativeCopy(const native_render::TargetDesc& source, const native_render::TargetDesc& dest,
+        uint32_t sourceX, uint32_t sourceY, uint32_t destX, uint32_t destY,
+        uint32_t width, uint32_t height);
+    void NativeDestroyTarget(uint64_t handle);
+    // Canonical Vulkan format bytes (depth=float32, stencil=uint8). This
+    // synchronized readback is only for actual CPU consumers; game locks must
+    // still apply the required guest format/endian/tiling conversion.
+    std::vector<uint8_t> NativeReadback(const native_render::TargetDesc& target,
+        uint32_t x, uint32_t y, uint32_t width, uint32_t height, bool stencil = false);
+    bool NativePresent(const native_render::TargetDesc& source, uint32_t width, uint32_t height);
 
     // Submit recorded work without waiting.
     void Submit();

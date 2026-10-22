@@ -16,6 +16,7 @@
 //                     indexed by texture fetch constant slot
 #pragma once
 #include <cstdint>
+#include "native_vertex.h"
 #include <string>
 #include <vector>
 
@@ -24,6 +25,7 @@ namespace gpu
     // Set once by renderer initialization, before shader translation/workers.
     extern bool g_workReductionEnabled;
     extern bool g_predicateCoalescingEnabled;
+    extern bool g_vertexRoutingEnabled;
 
     enum class ShaderStage : uint32_t { Vertex = 0, Pixel = 1 };
 
@@ -40,6 +42,8 @@ namespace gpu
         bool writesDepth = false;
         bool usesKill = false;
         bool usesMemExport = false;
+        bool nativeVertexEligible = false;
+        std::vector<native_vertex::Attribute> nativeAttributes;
         uint32_t vertexFetchMask = 0;    // fetch constant slots used by vfetch (x3 dwords... slot = const index)
         uint32_t vertexFetchConstants[3] = {};  // the vertex fetch constants (0..95) vfetch reads
         uint32_t texture2DMask = 0;      // texture fetch slots used, by dimension

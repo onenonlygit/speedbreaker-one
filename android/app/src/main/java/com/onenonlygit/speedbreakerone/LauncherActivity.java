@@ -21,7 +21,7 @@ import java.util.zip.*;
 public final class LauncherActivity extends Activity {
     private static final int IMPORT = 7312;
     private SharedPreferences prefs;
-    private TextView status;
+    private TextView status, backendStatus;
     private Button play;
     private boolean importing;
 
@@ -37,6 +37,12 @@ public final class LauncherActivity extends Activity {
         status = new TextView(this); status.setTextSize(17); panel.addView(status);
         Button drivers = new Button(this); drivers.setText("Select GPU driver");
         drivers.setOnClickListener(v -> selectDriver()); panel.addView(drivers);
+        backendStatus = new TextView(this); backendStatus.setTextSize(17); panel.addView(backendStatus);
+        Button backend = new Button(this); backend.setText("Select rendering backend");
+        backend.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Rendering backend (restart required)")
+            .setItems(new String[]{"Use in-game Advanced setting", "Legacy Vulkan", "Plume Vulkan"}, (d,w) -> {
+                getSharedPreferences("render_backend",MODE_PRIVATE).edit().putInt("override",w-1).commit(); refresh();
+            }).setNegativeButton("Cancel",null).show()); panel.addView(backend);
         play = new Button(this); play.setOnClickListener(v -> play(false)); panel.addView(play);
         Button restart = new Button(this); restart.setText("Restart game with selected driver");
         restart.setOnClickListener(v -> {
@@ -45,8 +51,9 @@ public final class LauncherActivity extends Activity {
                 .setNegativeButton("Cancel", null).setPositiveButton("Restart", (d,w) -> play(true)).show();
         }); panel.addView(restart);
         TextView help = new TextView(this);
-        help.setText("Import an ARM64 Turnip driver ZIP with meta.json. System driver is always available. Driver changes apply to a new game process; Resume keeps its current driver.");
-        panel.addView(help); setContentView(panel); refresh();
+        help.setText("Import an ARM64 Turnip driver ZIP with meta.json. System driver is always available. Driver and backend changes apply to a new game process; Resume keeps its current driver.");
+        panel.addView(help);
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this); scroll.addView(panel); setContentView(scroll); refresh();
     }
     @Override protected void onResume() { super.onResume(); if (status != null) refresh(); }
     private int gamePid() {
@@ -57,6 +64,8 @@ public final class LauncherActivity extends Activity {
         return 0;
     }
     private void refresh() {
+        int backend=getSharedPreferences("render_backend",MODE_PRIVATE).getInt("override",-1);
+        backendStatus.setText("Selected backend: "+(backend<0?"In-game Advanced setting":backend==0?"Legacy Vulkan":"Plume Vulkan"));
         status.setText("Selected driver: " + prefs.getString("name", "System") + (importing ? "\nImporting…" : ""));
         play.setText(gamePid() == 0 ? "Play" : "Resume game"); play.setEnabled(!importing);
     }
@@ -80,6 +89,7 @@ public final class LauncherActivity extends Activity {
     }
     private void launch() {
         Intent intent = new Intent(this, SpeedBreakerActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        intent.putExtra("renderer_backend",getSharedPreferences("render_backend",MODE_PRIVATE).getInt("override",-1));
         intent.putExtra("driver_dir", prefs.getString("dir", ""));
         intent.putExtra("driver_lib", prefs.getString("lib", ""));
         intent.putExtra("driver_name", prefs.getString("name", "System"));

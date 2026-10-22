@@ -5,6 +5,7 @@
 namespace platform::android {
 // Call before any Vulkan entry point. The module remains loaded for process life.
 bool InitializeVulkanLoader();
+int RendererBackendOverride();
 bool CreateVulkanSurface(SDL_Window* window, VkInstance instance, VkSurfaceKHR* surface);
 void ReportVulkanDriver(VkPhysicalDevice device);
 }

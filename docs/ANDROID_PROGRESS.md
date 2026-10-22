@@ -398,3 +398,85 @@ APK SHA256 b04e0640b2022d7937b031370cf2fb5c5f452fb1d18c840e9f093676402e3045;
 native Build ID fce54df293c9c7a1768e34a73e86b465393d7607.
 Retained 0.1.10 checksum unchanged. Build record under
 builds/android/0.1.11-turnip-performance/. No RP6 execution or gain verified.
+
+## Android 0.1.12 — real Plume command/resource integration
+
+The user reported no visible 0.1.11 performance improvement and crashes with
+custom drivers. Those reports remain unresolved; no successful device result is
+inferred from the prior build validation.
+
+Plume now executes game graphics/compute commands, owns renderer image
+allocations, and routes pipeline creation/descriptors/submission through shared
+Vulkan interoperability. One existing device, queue, loader and dispatch remain.
+Launcher and in-game backend selection preserve Legacy rollback. Custom EDRAM
+shader semantics, timestamps, lifecycle gates and presentation remain intact.
+Three offscreen/legacy checks (core+sync validation) and 44 host suites pass;
+Android optimized native link succeeds. See ANDROID_PLUME_RHI.md for precise
+migration boundaries, limitations and device acceptance steps. No RP6 speedup or
+playability claim is made.
+
+### 0.1.12 signed Plume APK completed
+
+Compiled clean source b27899e, version 0.1.12 code 13; both full Android ON/OFF
+native configurations link. Seven staged libraries and all 56,736 mapping entries
+verified. Retained certificate, ZIP/alignment, manifest/ABI and license checks pass.
+APK SHA256 248c69ac660f697bae4b0ea5ca098f82e66842ffbe530e839807aa66076e71cb;
+native Build ID 1da6a82968c8e94a6cb090d53bb9511ec925f32b.
+CI offscreen run 39271108669 passes. Build record:
+builds/android/0.1.12-plume-vulkan/. No RP6 execution, parity or speed gain verified.
+
+## RP6 Plume 0.1.12 result and 0.1.13 vertex-routing candidate
+
+Juan confirms Quick Race with Plume Vulkan + System driver at 720p, no observed
+visual glitches. Some scenes reach 40 FPS; overall performance is still poor.
+This is initial device gameplay evidence, not a matched performance gain or
+comprehensive image parity proof. Prior 0.1.11 custom-driver crashes remain open.
+
+Implemented precomputed vertex-memory routes with complete-attribute bounds,
+first-match snapshot priority and original per-word fallback. Relative ring bias
+preserves constants reuse across allocations. Existing geometry/format/endian,
+shader ALU, EDRAM and synchronization remain. Restart rollback and cumulative
+route-coverage logs included. 8.4M CPU address comparisons, actual GLSL GPU
+comparison, 120 format/target/memory shader variants, 45 host suites and four
+Plume/Legacy tests pass. No 0.1.13 RP6 gain inferred. See ANDROID_PERFORMANCE_0113.md.
+
+Additional 0.1.12 user report: Mr Purple T26 runs and reaches the 50 FPS range,
+with some drops to 26 FPS. This updates the blanket absence of custom-driver
+execution evidence, not the stability of other previously crashing drivers.
+Keep driver choice fixed while comparing the new vertex-routing setting.
+
+### 0.1.13 signed APK completed
+
+Clean compiled source 64fe727, version 0.1.13 code 14. Optimized full Android
+ARM64 native link and signed packaging pass. Retained certificate, seven staged
+libraries, 56,736 mapping entries, ZIP/alignment/manifest and dispatch checks pass.
+APK SHA256 4f44ad2a2937bbb658d7c9a91e11f6fb783721d44a70bfc1728faf99eca71126;
+native Build ID 265d14231f67525a1051c7a08ebc9d45f50e8021.
+CI offscreen run 39274316020 passes. 0.1.12 APK checksum verified unchanged.
+Build record: builds/android/0.1.13-plume-vulkan/. No new device gain claimed.
+
+## Full-native rendering decision and 0.1.14 first geometry slice
+
+Juan reports 0.1.13 remains about 30–40 FPS, with possible pacing improvement but
+no confirmed gain, and requests game-native rendering without GPU emulation.
+Implemented a hardware vertex-input path with exact address bounds, protected
+static/shared buffers or snapshots, native attribute layouts and Plume binding.
+Original format/endian/ALU retained; unsupported cases and optional-pipeline
+compilation fall back without losing draws. Added native pass counts and CPU
+preparation diagnostics. 46 host suites, four Vulkan/Legacy checks, 480 shader
+modules and Android native link pass. This is NOT a completed full-native
+renderer: game-call/resource interception, PM4 removal and native render-target
+ownership remain. See ANDROID_NATIVE_RENDERER.md for evidence and next stages.
+
+### 0.1.14 signed native-geometry stage completed
+
+Compiled clean source 17ddb60, version 0.1.14 code 15. APK/native build,
+retained signature, seven library identities, all 56,736 mapping symbols,
+ZIP/alignment/manifest/dispatch checks pass. APK SHA256
+56cf6fa50214012f5567451ed60d1b60495661019e53a674526bfbbb5c1fb5f4;
+native Build ID 015811f3b5b4401c3a7cccf658e8271127c33cd7.
+0.1.12 and 0.1.13 APK checksums verified unchanged. CI queued, local tests pass.
+Fair synthetic shader comparison uses ordinary primitive mode on both paths:
+13,912 bytes/35 branches vs native 6,620/16. The earlier 18,288/57 comparison
+included compatibility primitive expansion and was not a fair runtime delta.
+No RP6 performance or completed full-native renderer claim.

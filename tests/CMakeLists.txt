@@ -15,6 +15,10 @@ function(sb_test name)
     add_test(NAME ${name} COMMAND ${name} ${T_ARGS})
 endfunction()
 
+sb_test(native_draw_state_test SOURCES ${RT}/gpu/game_shader.cpp ${RT}/gpu/shader_translator.cpp ${RT}/gpu/xenos/ucode.cpp)
+sb_test(native_vertex_test SOURCES ${RT}/gpu/shader_translator.cpp ${RT}/gpu/xenos/ucode.cpp)
+sb_test(game_shader_test SOURCES ${RT}/gpu/game_shader.cpp ${RT}/gpu/shader_translator.cpp ${RT}/gpu/xenos/ucode.cpp)
+sb_test(vertex_route_test)
 sb_test(block_ranges_test)
 sb_test(pass_timing_test)
 sb_test(disc_mount_test SOURCES ${RT}/install/disc_mount.cpp ${RT}/install/disc_source.cpp
@@ -157,6 +161,10 @@ sb_test(switch_tables_test ARGS ${ROOT}/config/switch_tables.toml ${ROOT}/config
 # runtime maps it.
 sb_test(write_watch_test SOURCES ${RT}/kernel/write_watch.cpp ${RT}/cpu/guest_time.cpp)
 target_include_directories(write_watch_test PRIVATE ${RT}/kernel ${RT}/thirdparty/o1heap ${ROOT}/ppc
+    ${ROOT}/tools/XenonRecomp/XenonUtils ${ROOT}/tools/XenonRecomp/thirdparty/simde)
+sb_test(game_shader_hooks_test SOURCES ${RT}/game/graphics_shaders.cpp ${RT}/gpu/game_shader.cpp
+    ${RT}/gpu/shader_translator.cpp ${RT}/gpu/xenos/ucode.cpp)
+target_include_directories(game_shader_hooks_test PRIVATE ${RT}/kernel ${RT}/thirdparty/o1heap ${ROOT}/ppc
     ${ROOT}/tools/XenonRecomp/XenonUtils ${ROOT}/tools/XenonRecomp/thirdparty/simde)
 # The guest vblank lock's closed-loop simulation (a tool more than a test).
 add_executable(vblank_lock_sim ${CMAKE_CURRENT_SOURCE_DIR}/vblank_lock_sim.cpp ${RT}/video/refresh_fit.cpp ${RT}/video/vblank_lock.cpp)

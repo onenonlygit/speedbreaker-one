@@ -1,0 +1,32 @@
+--- a/plume_vulkan.h
++++ b/plume_vulkan.h
+@@ -9,6 +9,7 @@
+ 
+ #include "plume_render_interface.h"
+ 
++#include <cstddef>
+ #include <mutex>
+ #include <set>
+ #include <unordered_map>
+@@ -176,6 +177,8 @@
+         Type type = Type::Unknown;
+ 
+         VulkanPipeline(VulkanDevice *device, Type type);
++        // Literal nullptr denotes a borrowed handle, never an owned pipeline.
++        VulkanPipeline(std::nullptr_t, Type type);
+         virtual ~VulkanPipeline() override;
+     };
+ 
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -1366,6 +1366,10 @@
+         this->type = type;
+     }
+ 
++    VulkanPipeline::VulkanPipeline(std::nullptr_t, Type type) : type(type) {
++        assert(type == Type::Graphics || type == Type::Compute);
++    }
++
+     VulkanPipeline::~VulkanPipeline() { }
+ 
+     // VulkanComputePipeline

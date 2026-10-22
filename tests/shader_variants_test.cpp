@@ -27,6 +27,28 @@ static std::vector<uint32_t> Exports(const std::vector<uint32_t>& destinations)
 
 int main(int argc, char** argv)
 {
+    if (argc == 2) {
+        std::filesystem::create_directories(argv[1]);
+        // Actual fetch encoding: opcode 0, source r0.x, constant 0,
+        // destination r1.xyzw, stride four words, followed by position export.
+        for (unsigned format : {6u, 7u, 16u, 17u, 25u, 26u, 31u, 32u, 33u, 34u, 35u, 36u, 37u, 38u, 57u}) {
+            auto words=Exports({62});
+            words[0]=1u|(2u<<12)|(1u<<16);
+            words.insert(words.begin()+3,{1u<<12, 0x688u|(format<<16),4u});
+            for (bool routing : {false,true}) {
+                gpu::g_vertexRoutingEnabled=routing;
+                auto fetched=gpu::TranslateShader(gpu::ShaderStage::Vertex,words.data(),words.size());
+                assert(fetched.ok);
+                assert(fetched.vertexFetchConstants[0]==1u);
+                assert(fetched.nativeVertexEligible);
+                std::ofstream(std::filesystem::path(argv[1])/("nativefetch"+std::to_string(format)+(routing?"-routed.vert":"-legacy.vert")))
+                    << fetched.glsl.substr(0,fetched.glsl.find('\n')+1) << "#define NATIVE_VERTEX_INPUT\n#define VERTEX_PRIMITIVE_MODE 0\n" << fetched.glsl.substr(fetched.glsl.find('\n')+1);
+                if(routing) assert(fetched.glsl.find("uvec4 vwords = vertexWords")!=std::string::npos);
+                std::ofstream(std::filesystem::path(argv[1])/("fetch"+std::to_string(format)+(routing?"-routed.vert":"-legacy.vert")))<<fetched.glsl;
+            }
+        }
+        gpu::g_vertexRoutingEnabled=false;
+    }
     auto vsWords = Exports({62, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
     auto psWords = Exports({0});
     auto vs = gpu::TranslateShader(gpu::ShaderStage::Vertex, vsWords.data(), vsWords.size());

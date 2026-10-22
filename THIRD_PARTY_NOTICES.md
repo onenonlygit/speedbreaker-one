@@ -100,3 +100,14 @@ Full notices ship in the APK's assets/licenses. Users import their own Turnip
 bundles; no custom driver binary is redistributed by this project.
 Predicate coalescing and safe depth-stage reduction follow the reference audit
 above, implemented in SpeedBreaker's existing translator and pipeline builder.
+
+
+### Plume Vulkan backend (optional Android 0.1.12)
+
+Plume, Copyright (c) 2024 renderbag and contributors, MIT, pinned to
+[e48a55be0cff0f1e82b25cd0ab68be37357ee0f9](https://github.com/renderbag/plume/tree/e48a55be0cff0f1e82b25cd0ab68be37357ee0f9).
+The local patch in patches/plume adds shared Vulkan device/command-buffer and
+native state interoperability. Its pinned VulkanMemoryAllocator is MIT;
+Vulkan-Headers are Apache-2.0/MIT. Plume's pinned Volk replaces the older runtime
+Volk when this backend is compiled, rather than defining a second loader.
+Full Plume/VMA/Volk notices are included in the APK assets/licenses directory.

@@ -28,6 +28,17 @@ std::string JavaString(const char* methodName) {
     return value;
 }
 }
+int RendererBackendOverride() {
+    auto* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+    auto activity = static_cast<jobject>(SDL_GetAndroidActivity());
+    if (!env || !activity) return -1;
+    auto type = env->GetObjectClass(activity);
+    auto method = env->GetMethodID(type, "rendererBackendOverride", "()I");
+    int result = method ? env->CallIntMethod(activity, method) : -1;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); result = -1; }
+    env->DeleteLocalRef(type); env->DeleteLocalRef(activity);
+    return result >= 0 && result <= 1 ? result : -1;
+}
 bool InitializeVulkanLoader() {
     if (s_loader) return true;
     auto directory = JavaString("gpuDriverDirectory");

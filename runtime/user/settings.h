@@ -68,7 +68,11 @@ namespace settings
         GpuScheduling,
         GpuWorkReduction,
         PredicateCoalescing,
+        VertexMemoryRouting,
+        NativeVertexInput,
+        GameShaderResources,
         DepthStageReduction,
+        RenderBackend,
         Count
     };
     constexpr size_t kCount = size_t(Id::Count);

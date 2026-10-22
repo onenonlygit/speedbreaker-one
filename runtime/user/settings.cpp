@@ -120,6 +120,9 @@ namespace settings
 
         // Defaults are what the runtime did before settings existed, so an
         // empty settings.toml changes nothing.
+        constexpr EnumEntry kRenderBackendEntries[] = {
+            {0, "legacy", "Legacy Vulkan"}, {1, "plume", "Plume Vulkan"}
+        };
         constexpr Option kOptions[] = {
             // Video
             { .id = Id::Fullscreen, .category = Category::Display, .type = Type::Bool, .apply = Apply::Live, .hidden = kFullscreenHidden,
@@ -230,10 +233,37 @@ namespace settings
               .table = "advanced", .key = "predicate_coalescing", .label = "Shader Predicate Coalescing",
               .description = "Combine repeated shader conditions without changing samples or arithmetic. Restart to compare.",
               .env = "SB_PREDICATE_COALESCING", .defaultValue = kGpuWorkDefault },
+            { .id = Id::VertexMemoryRouting, .category = Category::Advanced, .type = Type::Bool, .apply = Apply::Restart, .hidden = kGpuSchedulingHidden,
+              .table = "advanced", .key = "vertex_memory_routing", .label = "Vertex Memory Routing",
+              .description = "Read vertex attributes through precomputed memory routes. Restart to compare with per-word routing.",
+              .env = "SB_VERTEX_MEMORY_ROUTING", .defaultValue = kGpuWorkDefault },
+            { .id = Id::NativeVertexInput, .category = Category::Advanced, .type = Type::Bool, .apply = Apply::Restart, .hidden = kGpuSchedulingHidden,
+              .table = "advanced", .key = "native_vertex_input", .label = "Native Vertex Input",
+              .description = "Use hardware vertex attributes for supported geometry. Unsupported draws retain the compatibility renderer. Restart to compare.",
+              .env = "SB_NATIVE_VERTEX_INPUT", .defaultValue = kGpuWorkDefault },
+            { .id = Id::GameShaderResources, .category = Category::Advanced, .type = Type::Bool, .apply = Apply::Restart, .hidden = kGpuSchedulingHidden,
+              .table = "advanced", .key = "game_shader_resources", .label = "Game Shader Resources",
+              .description = "Prepare shader resources when the game creates them. Experimental; may change loading hitches. Restart to compare.",
+              .env = "SB_GAME_SHADER_RESOURCES", .defaultValue = kGpuWorkDefault },
             { .id = Id::DepthStageReduction, .category = Category::Advanced, .type = Type::Bool, .apply = Apply::Restart, .hidden = kGpuSchedulingHidden,
               .table = "advanced", .key = "depth_stage_reduction", .label = "Depth Stage Reduction",
               .description = "Remove unused shader outputs and safe fragment stages from depth draws. Keeps alpha-tested casters. Restart to compare.",
               .env = "SB_DEPTH_STAGE_REDUCTION", .defaultValue = kGpuWorkDefault },
+            { .id = Id::RenderBackend, .category = Category::Advanced, .type = Type::Enum, .apply = Apply::Restart,
+#ifdef SB_PLUME_RHI
+              .hidden = false,
+#else
+              .hidden = true,
+#endif
+              .table = "advanced", .key = "render_backend", .label = "Rendering Backend",
+              .description = "Plume Vulkan records game draws and compute resolves on the existing Vulkan device. Restart to switch backends.",
+              .env = "SB_RENDER_BACKEND",
+#ifdef SB_PLUME_RHI
+              .defaultValue = 1,
+#else
+              .defaultValue = 0,
+#endif
+              .entries = kRenderBackendEntries },
         };
         static_assert(std::size(kOptions) == kCount, "one row per settings::Id");
 
