@@ -1,30 +1,86 @@
-# SpeedBreaker One — personal Android fork
+# SpeedBreaker One
 
-This is **onenonlygit's personal, AI-assisted Android ARM64 fork** of
-[SpeedBreaker by SpeedBreakerProject / project(u)](https://github.com/SpeedBreakerProject/speedbreaker).
-It is an independent experimental adaptation, not an official upstream Android release.
-Original authors retain credit for SpeedBreaker's recompilation, runtime,
-renderer, UI and artwork. The original banners and screenshots below are retained;
-they illustrate upstream SpeedBreaker and are not Android performance claims.
+**Applying IT coursework through AI-assisted project management · Android ARM64 development**
 
-**Current milestone (October 8, 2026):** one complete Quick Race sprint on a
-Retroid Pocket 6. Roads/world geometry, cars and HUD now render; music and some
-effects play. Engine audio remains missing, performance is roughly 21–30 FPS
-in sampled racing logs at internal 720p, and repeated-race stability is unverified.
+**Human-directed, AI-implemented personal project**  
+**Target device:** Retroid Pocket 6 · **Current goal:** correct, playable racing at 720p60
 
-- [Download the tested 0.1.2 Android race APK](https://github.com/onenonlygit/speedbreaker-one/releases/download/android-v0.1.2-race/SpeedBreaker-One-arm64-race.apk)
-- [APK status, installation, checksum and metadata](https://github.com/onenonlygit/speedbreaker-one/tree/android/rp6-bringup/builds/android/0.1.2-android-race)
-- [Progress and continuation checkpoint](https://github.com/onenonlygit/speedbreaker-one/blob/android/rp6-bringup/docs/ANDROID_PROGRESS.md)
-- [Active Android source branch](https://github.com/onenonlygit/speedbreaker-one/tree/android/rp6-bringup)
+SpeedBreaker One is my personal Android adaptation of [SpeedBreaker](https://github.com/SpeedBreakerProject/speedbreaker), the open-source static recompilation of *Need for Speed: Most Wanted* (2005). I direct AI coding agents to adapt, troubleshoot and extend the existing project, then test the results on my own handheld.
 
-The Android build reads the selected ISO directly through Android's file picker;
-it does not require a second extracted copy. Supply your own supported game disc
-image. No game assets are hosted here. Do not report this fork's Android issues
-as upstream-supported Android bugs.
+Although this is a personal project, I manage it as a structured technical initiative. I apply project management and troubleshooting methods from my college IT coursework to define requirements, break goals into manageable stages, set priorities and track progress.
+
+**I provide the direction, priorities, device testing and decisions; AI coding agents carry out the software engineering implementation.** This gives me practical experience managing scope, responding to setbacks and keeping a complex project focused on its goals.
+
+[Current development](https://github.com/onenonlygit/speedbreaker-one/tree/android/plume-rhi) · [Implementation PR](https://github.com/onenonlygit/speedbreaker-one/pull/1) · [Engineering checkpoints](https://github.com/onenonlygit/speedbreaker-one/blob/android/plume-rhi/docs/ANDROID_NATIVE_RENDERER.md) · [Build records](https://github.com/onenonlygit/speedbreaker-one/tree/android/plume-rhi/builds/android)
+
+## Putting IT coursework into practice
+
+I treat the work as an opportunity to practise leading a technical project: establish what needs to be achieved, organise the work, delegate implementation and evaluate the results. AI agents analyse and write code; I direct their tasks, test builds on the target device and use the findings to decide what happens next.
+
+| My responsibilities | Work delegated to AI coding agents |
+| --- | --- |
+| Define the user problem, target hardware, priorities and acceptance criteria. | Inspect source code, research implementation details and propose technical approaches. |
+| Break the goal into stages and redirect work when results do not meet the requirements. | Implement and revise platform code, rendering changes, build scripts and tests. |
+| Install builds, test gameplay and drivers, describe visual/audio problems, and supply logs and recordings. | Analyse those reports, diagnose failures and run available build and regression checks. |
+| Decide the next development priority and require evidence for progress claims. | Record changes, validation results, limitations and continuation notes in Git. |
+
+My workflow is iterative: **define the goal → plan a manageable stage → direct implementation → test and document the result → choose the next step.** I use acceptance criteria to make goals concrete, checkpoints to keep track of completed and outstanding work, and reversible changes to preserve a working baseline when an approach fails.
+
+For example, playable racing did not meet the performance goal, and routing rendering through Plume did not establish a large enough improvement. I directed the work toward a separate native rendering path while retaining a working fallback. The remaining work is recorded explicitly rather than treating an intermediate milestone as completion.
+
+AI output is treated as work to validate. A compiled build, a passing host test and successful gameplay on an Adreno device provide different evidence; the project records those differences.
+
+## Work completed under my direction
+
+The items below describe this fork's adaptation and extension work. They build on substantial upstream code.
+
+| Area | Progress and evidence |
+| --- | --- |
+| Android platform and builds | Android ARM64 build/package workflow and signed development APKs, with build metadata, checksums and retained signing identity. [Build records](https://github.com/onenonlygit/speedbreaker-one/tree/android/plume-rhi/builds/android). |
+| Game loading and handheld use | Android file selection and direct ISO access without requiring another extracted copy. A full Quick Race sprint was completed on the RP6; subsequent builds have continued through device testing. [Progress log](https://github.com/onenonlygit/speedbreaker-one/blob/android/plume-rhi/docs/ANDROID_PROGRESS.md). |
+| Audio and app behaviour | Android stereo-output routing for the existing multichannel mix, audio diagnostics, and pause/background handling. Later device feedback reported most audio working; broader coverage remains open. [Audio work](https://github.com/onenonlygit/speedbreaker-one/blob/android/plume-rhi/docs/ANDROID_AUDIO.md). |
+| Graphics correctness | Integrated upstream shadow/depth fixes and directed follow-up visual investigation with capture tools and regression checks. Upstream fixes remain credited to their authors. |
+| Performance diagnosis | CPU/GPU timing, frame/pass diagnostics, device-log collection and documented investigations to guide changes. [Investigation](https://github.com/onenonlygit/speedbreaker-one/blob/android/plume-rhi/docs/ANDROID_60FPS_INVESTIGATION.md). |
+| Plume integration | Real graphics/compute commands and image allocation run through Plume in the selectable backend, sharing the existing Vulkan device and loader. Legacy Vulkan remains available; driver selection is preserved, with custom-driver crashes still unresolved. [Implementation record](https://github.com/onenonlygit/speedbreaker-one/blob/android/plume-rhi/docs/ANDROID_PLUME_RHI.md). |
+| Native rendering development | Explicit native draws, images, clears/copies, readback, presentation, ordered submission, GPU fences and a CPU device bridge are implemented and exercised in host tests. Full game integration is still in progress. [Native renderer checkpoint](https://github.com/onenonlygit/speedbreaker-one/blob/android/plume-rhi/docs/ANDROID_NATIVE_RENDERER.md). |
+| Validation and continuity | Reproducible tests, Vulkan validation, AddressSanitizer checks, GitHub Actions workflows, reversible commits and engineering checkpoints. The latest local checkpoint passed three native-runtime cases and six existing Plume/Legacy cases. [Test scope](https://github.com/onenonlygit/speedbreaker-one/blob/android/plume-rhi/tests/native_runtime/README.md). |
+
+## Current status — October 22, 2026
+
+**Playable Android development builds exist; the performance and full-native-rendering goals are unfinished.**
+
+- **On-device results:** Quick Race works. Recent reported racing is generally around 30–40 FPS at 720p, with higher peaks and substantial drops depending on scene and driver. Locked 60 FPS has not been achieved.
+- **Latest packaged checkpoint:** 0.1.15. Its optimized ARM64 packaging and signing were verified; that does not establish gameplay or performance validation for every change. [Build evidence](https://github.com/onenonlygit/speedbreaker-one/tree/android/plume-rhi/builds/android/0.1.15-game-shader-resources).
+- **Native renderer:** GPU operations and the device bridge pass host tests, including exact pixel comparisons. Original game rendering calls and several resource/synchronization contracts still need connecting. A fully native gameplay APK has not been delivered.
+- **Known open issues:** variable racing performance, custom-driver crashes in reported sessions, and incomplete coverage of stability, rendering and audio across the game.
+
+The game CPU code is statically recompiled. The currently playable graphics path still handles Xbox 360 GPU commands and EDRAM compatibility; using Plume does not by itself remove that work. The native renderer is a separate, ongoing migration.
+
+## What this project demonstrates
+
+This project connects classroom learning with a technical goal I care about. It provides a practical record of **requirements definition, prioritisation, task delegation, structured troubleshooting, hands-on testing, change management and documentation**.
+
+The learning extends beyond whether a build works: it includes keeping the scope clear, recognising when an approach is not meeting its goal, communicating limitations and maintaining enough documentation to resume work without losing direction. The repository records that process alongside the implementation.
+
+## Source, builds and attribution
+
+- [`android/plume-rhi`](https://github.com/onenonlygit/speedbreaker-one/tree/android/plume-rhi): active Plume and native-renderer development.
+- [`android/rp6-bringup`](https://github.com/onenonlygit/speedbreaker-one/tree/android/rp6-bringup): earlier Android bring-up work.
+- [Engineering methodology](https://github.com/onenonlygit/speedbreaker-one/blob/android/plume-rhi/docs/ENGINEERING_METHODOLOGY.md): evidence, boundaries, rollback and validation requirements.
+- [Historical public releases](https://github.com/onenonlygit/speedbreaker-one/releases): earlier APKs; use the version-specific records rather than assuming the newest source is packaged.
+
+**Credit:** SpeedBreaker was created by **project(u) / SpeedBreakerProject**. Its recompilation foundation, runtime, renderer, interface and artwork are upstream work. XenonRecomp, Xenia, SDL, Plume and other dependencies retain their own authorship and licences. My contribution is directing this AI-assisted Android adaptation and its ongoing development.
+
+This is an independent experimental fork, not an official upstream Android release. No game executable, disc image, generated game code or signing credentials are distributed in this repository. Players supply their own supported game copy. The upstream GPL-3.0-or-later licence and third-party notices continue to apply.
 
 ---
 
-## Original SpeedBreaker documentation and images
+## Upstream documentation and artwork
+
+The original banners, screenshots, credits and platform documentation are preserved below. Screenshots show upstream SpeedBreaker, not RP6 performance or a completed Android native renderer.
+
+<details>
+<summary><strong>Expand original SpeedBreaker documentation, screenshots and credits</strong></summary>
 
 The following documentation describes upstream platforms and features. It does
 not imply that every feature is implemented or verified in this Android fork.
@@ -706,3 +762,5 @@ Public License.
 [dl-steamos-arm64]: https://github.com/SpeedBreakerProject/speedbreaker/releases/latest/download/SpeedBreaker-steamos-arm64.tar.xz
 [dl-macos]: https://github.com/SpeedBreakerProject/speedbreaker/releases/latest/download/SpeedBreaker-macos.dmg
 [issues]: https://github.com/SpeedBreakerProject/speedbreaker/issues
+
+</details>
