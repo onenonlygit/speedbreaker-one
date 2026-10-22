@@ -429,3 +429,11 @@ are not exercised by these fixture results.
 The normal game leaves resource attachment disabled. Game draw/UP, aliases and
 CPU materialization, multisampling and guest synchronization still need work;
 CP startup is unchanged. No new APK or performance result accompanies this stage.
+
+The subsequent USA ClearF hook (`8259A308`) now records real native RGBA8 and
+normalized depth/stencil clears with verified flags and rectangle/viewport/
+scissor semantics. The full GPU fixture verifies exact pixels, selective aspects,
+original context preservation, primary-frame extents and explicit rejection of
+unsupported conversion/MSAA cases. See the audit's ClearF section for the ABI
+and remaining limits. Normal gameplay still leaves native attachment disabled;
+draw/UP/resolve routing and guest resource/synchronization contracts remain open.

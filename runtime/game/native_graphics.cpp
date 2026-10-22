@@ -11,6 +11,7 @@ extern "C" PPC_FUNC(__imp__sub_82589FC8);
 extern "C" PPC_FUNC(__imp__sub_8258D920);
 extern "C" PPC_FUNC(__imp__sub_8258DC88);
 extern "C" PPC_FUNC(__imp__sub_8262E9F0);
+extern "C" PPC_FUNC(__imp__sub_8259A308);
 
 namespace game::native_graphics {
 namespace {
@@ -67,6 +68,49 @@ void DepthBound(uint8_t* base,uint32_t selected) {
 void BeforeFree(uint32_t object) {
     if(object) WithDevice(0,[&](auto& native){native.DestroySurface(object);});
 }
+void Cleared(uint8_t* base,uint32_t selected,uint32_t flags,uint32_t rectangle,uint32_t color,float depth,uint32_t stencil) {
+    WithDevice(selected,[&](auto& native){
+        if(!flags) return;
+        if(!gpu::game_shader::GuestRange(selected,13484)) throw std::out_of_range("native clear device range");
+        using Rect=gpu::native_render::DrawState::Scissor;
+        auto readRect=[&](uint32_t address){
+            if(!gpu::game_shader::GuestRange(address,16)) throw std::out_of_range("native clear rectangle/color");
+            return Rect{int32_t(PPC_LOAD_U32(address)),int32_t(PPC_LOAD_U32(address+4)),
+                int32_t(PPC_LOAD_U32(address+8)),int32_t(PPC_LOAD_U32(address+12))};
+        };
+        Rect rect;
+        if(rectangle) rect=readRect(rectangle);
+        else {
+            uint32_t first=PPC_LOAD_U32(selected+12536);if(!first) first=PPC_LOAD_U32(selected+12552);
+            if(!first) return;
+            const auto target=native.DescribeSurface(first);rect={0,0,int32_t(target.width),int32_t(target.height)};
+            // Original ClearF uses the logical frame extent when every live
+            // attachment is a primary-frame attachment (verified USA fields).
+            bool frame=(PPC_LOAD_U8(selected+10432)&16)!=0;
+            for(unsigned i=0;i<5&&frame;++i) {
+                uint32_t bound=PPC_LOAD_U32(selected+12536+i*4);
+                frame=!bound||bound==PPC_LOAD_U32(selected+12972+i*4);
+            }
+            if(frame) {rect.x1=int32_t(PPC_LOAD_U32(selected+13476));rect.y1=int32_t(PPC_LOAD_U32(selected+13480));}
+        }
+        const auto viewport=readRect(selected+12808); // x, y, width, height
+        int64_t x0=std::max<int64_t>(rect.x0,viewport.x0),y0=std::max<int64_t>(rect.y0,viewport.y0);
+        int64_t x1=std::min<int64_t>(rect.x1,int64_t(viewport.x0)+viewport.x1);
+        int64_t y1=std::min<int64_t>(rect.y1,int64_t(viewport.y0)+viewport.y1);
+        if(PPC_LOAD_U32(selected+11952)) {
+            const auto scissor=readRect(selected+12832);
+            x0=std::max<int64_t>(x0,scissor.x0);y0=std::max<int64_t>(y0,scissor.y0);
+            x1=std::min<int64_t>(x1,scissor.x1);y1=std::min<int64_t>(y1,scissor.y1);
+        }
+        if(x0>=x1||y0>=y1) return;
+        std::array<float,4> rgba{};
+        if((flags&15)&&color) {
+            if(!gpu::game_shader::GuestRange(color,16)) throw std::out_of_range("native clear color range");
+            for(unsigned i=0;i<4;++i) rgba[i]=std::bit_cast<float>(uint32_t(PPC_LOAD_U32(color+i*4)));
+        }
+        native.ClearBound(flags,{int32_t(x0),int32_t(y0),int32_t(x1),int32_t(y1)},color?rgba.data():nullptr,depth,stencil);
+    });
+}
 }
 
 PPC_FUNC(sub_82589FC8) {
@@ -89,4 +133,12 @@ PPC_FUNC(sub_8262E9F0) {
     // before the original can recycle their CPU allocation. Other frees pass through.
     game::native_graphics::BeforeFree(ctx.r3.u32);
     __imp__sub_8262E9F0(ctx,base);
+}
+PPC_FUNC(sub_8259A308) {
+    // ClearF(device, flags, optional RECT*, float4*, depth, stencil). r7 is
+    // the ABI slot occupied by the floating depth argument; stencil is r8.
+    const uint32_t selected=ctx.r3.u32,flags=ctx.r4.u32,rectangle=ctx.r5.u32,color=ctx.r6.u32,stencil=ctx.r8.u32;
+    const float depth=float(ctx.f1.f64);
+    __imp__sub_8259A308(ctx,base);
+    game::native_graphics::Cleared(base,selected,flags,rectangle,color,depth,stencil);
 }

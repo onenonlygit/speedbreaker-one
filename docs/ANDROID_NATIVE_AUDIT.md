@@ -94,3 +94,36 @@ draw/UP entry, then scissor/tiling-independent state, resolve aliases and guest
 CPU/GPU synchronization. The original CPU surface constructor still performs
 its allocation bookkeeping. This audit does not claim a playable native APK,
 an Android rebuild, RP6 execution or any performance gain from these hooks.
+
+## ClearF continuation
+
+Verified USA `8259A308` now forwards semantic image clears after original CPU
+bookkeeping when a native device is attached. Source tracing establishes this
+ABI: r3 device, r4 flags, r5 optional single RECT pointer, r6 float4 color pointer,
+f1 depth and r8 stencil. r5 is not a rectangle count; r7 is the integer argument
+slot occupied by depth in the ABI. Input registers/depth are captured before the
+original routine clobbers them; its returned context is preserved.
+
+Color bits 0–3 select attachments; bit 4 clears depth and bit 5 clears stencil.
+The rectangle intersects the CPU viewport at device+12808 and optional scissor
+at +12832 (enable +11952). The default rectangle uses target dimensions or the
+verified primary-frame extent at +13476/+13480 when the primary bindings match.
+Native clears clip to each image's dimensions and remain image-resident.
+
+Current support is canonical RGBA8 and normalized depth/stencil. Unsupported
+color-format conversions, non-normalized depth and null color for an actual
+color clear fail explicitly. Multisampled images remain unsupported. Format
+support is checked before any member of a multi-target clear is recorded.
+Source also shows that a nonempty color mask selecting no live color targets
+emits no depth clear; this boundary is preserved instead of applying depth
+flags unconditionally. Unbound depth aspects are ignored.
+
+The GPU fixture verifies exact pixels for rectangle/viewport/scissor clipping,
+default and primary-frame rectangles, ignored unrelated-device calls, depth-only
+and stencil-only changes, stencil preservation, no-op unbound color selection,
+and rejection before a partially applied multi-target clear. All three native
+CTest cases pass with explicit completion markers, ASan and core/sync validation.
+The six existing Plume/Legacy tests also passed with completion checks during
+this audit. The original game bodies remain source-verified rather than executed
+in the fixture. Draw/UP routing, texture aliases and the other gameplay contracts
+listed above remain open; this clear subset is not a complete native game backend.

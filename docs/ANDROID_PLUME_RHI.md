@@ -143,3 +143,9 @@ native device. These wrappers now drive validated GPU resource lifetime/binding
 in the full fixture, including original-context preservation and actual image
 readback. Normal gameplay does not attach this partial path; complete native
 gameplay, multisampling, CPU aliases/locks and its APK remain outstanding.
+
+USA ClearF also now forwards verified rectangle/viewport/scissor-aware RGBA8 and
+normalized depth/stencil clears to native images under that attachment. Exact
+GPU pixel/aspect tests pass; unsupported format conversions are explicit errors.
+The [audit](ANDROID_NATIVE_AUDIT.md) records the supported subset and ABI. This
+does not activate a complete native gameplay path or create a new APK.

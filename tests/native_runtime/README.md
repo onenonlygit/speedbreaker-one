@@ -45,3 +45,12 @@ and detach cleanup. Seven normal and one indexed draw now execute through Plume.
 Original game function bodies are source-verified, not executed in this fixture.
 CTest requires explicit completion messages so an empty/truncated executable
 cannot be accepted as a successful zero-second run.
+
+The real ClearF wrapper is linked with a synthetic original callee as well.
+Exact GPU comparisons cover its single optional RECT pointer, float4 endian
+decoding, depth in f1/stencil in r8, viewport/scissor intersection, primary-frame
+default extent, color/depth/stencil selection and unbound-color no-op behaviour.
+Unsupported color conversion is rejected before partially clearing other targets.
+This proves the wrapper/native operation subset, not original game-body execution
+or gameplay coverage. Supported native ClearF formats are RGBA8 and normalized
+depth/stencil; MSAA, other color formats and null-color defaults remain open.
