@@ -313,3 +313,76 @@ Verification actually run:
 
 Rollback is the previous source commit; the existing launcher Legacy/Plume
 choices and all previously packaged APKs remain unchanged.
+
+## Native owner and full renderer validation — October 22, 2026
+
+Baseline `62dd308`; last packaged game remains 0.1.15. Workspace maintenance
+removed local uncommitted work twice. The recovered source is being published
+in stages so continuation no longer depends on that workspace. There is still
+no selectable full-native game backend or new APK from this stage.
+
+Confirmed defects and isolated fixes:
+
+- Pipeline compilation looked up native shader hashes in the legacy IM_LOAD
+  cache. That inserted null entries and crashed on the compiler thread. The
+  pipeline now receives its actual retained vertex/pixel shader objects and
+  checks stage/hash identity. Both inline and threaded compilation are tested.
+- Native shader IDs were treated as globally unique although each Library
+  starts at ID 1. The native cache retains immutable resource ownership and
+  keys by resource identity. A real translated resource with another library's
+  ID 1 now renders the expected pixels.
+- Clear-pass diagnostics could read a missing compatibility register array.
+  Native passes now exclude that EDRAM-only diagnostic condition; tests leave
+  NFSMW_LOG_UNTILED_AREA enabled to exercise the boundary.
+- The CPU GamePresent hook targeted USA DrawIndexedVertices (82593A58).
+  Verified regenerated USA source identifies 825987E0, which calls VdSwap, as
+  the swap routine. The corrected wrapper retains the complete returned PPC
+  context. Prior CPU present/frame-interval metrics were mislabeled; existing
+  GPU timestamp measurements are unaffected.
+
+`native_worker` now owns native initialization, recording, submission and idle
+submission service on a dedicated thread. Calls carry immutable state/target
+values, use a bounded queue, and wait for recording before guest geometry may
+be reused. The owner honors guest suspension and the existing foreground gate.
+Job exceptions reach callers; owner failure releases queued waiters. Explicit
+native fences use the renderer's ordered completion queue and submit before
+returning their futures. Eight concurrent callers exercise startup/fences.
+The owner shares the presenter's existing device, loader and queue mutex.
+It does not start or consume a PM4 stream.
+
+Required native pipelines wait for compilation even if compatibility async
+shader skipping is configured. Failed native draws propagate failure instead
+of silently reporting success after skipping work. Optional hardware-input
+pipeline compilation retains the equivalent vertex-pulling fallback.
+
+Actual validation in this recovered workspace:
+
+- Complete production renderer + native worker build succeeds with Clang 18,
+  Debug AddressSanitizer, pinned Plume and glslang 15.1.0.
+- Both inline and one-worker pipeline tests pass on lavapipe with Khronos core
+  and synchronization validation and zero validation errors. Five Plume draws
+  execute; compute dispatch count remains zero.
+- Exact 16x16 color/scissor pixels, image sampling, 65,538-vertex count, real
+  shader translation/hardware attributes, depth and unchanged stencil, offset
+  copy/readback, exception propagation, fences and target retirement pass.
+- Independent Vulkan readback verifies front-image pixels before and after
+  destroying the native source target. This validates presentation handoff and
+  image ownership, not an Android swapchain or displayed RP6 output.
+- Separate actual CPU timing-wrapper test checks original-call count and every
+  returned context byte. All three native-runtime CTest entries pass.
+- The fixture uses a synthetic PPC address-layout header and public compiler
+  headers; it requires neither the private XEX nor generated game code. The
+  existing GitHub workflow now builds/runs it and retains its test log.
+
+See tests/native_runtime/README.md for reproduction and precise boundaries.
+Immutable write-watch stubs do not test CPU lock faults or texture aliases.
+Process-lifetime production threads use `_Exit` in the fixture; LeakSanitizer
+is disabled, and this is not a leak check. No RP6 performance gain is claimed.
+No Android compilation/packaging was repeated for these recovered changes.
+
+The next gameplay integration still requires real game surface allocation
+generations, patched shader bindings, draw/UP/clear/resolve hooks, texture
+aliases/cubes/mips and CPU materialization, then replacing guest fence/event/
+query/ring contracts and disabling CP startup. The owner/fence implementation
+and validated GPU operations provide those hooks' execution destination;
+the current game still uses the compatibility renderer until that migration.

@@ -3263,7 +3263,7 @@ namespace gpu::renderer
                 // is spent, draws just check. A per-draw wait made a pipeline
                 // used by 13 draws cost 47 ms a frame while it compiled.
                 auto waitStart = std::chrono::steady_clock::now();
-                if (!optional && (!settings::GetBool(settings::Id::AsyncShaders) || s_frame < s_waitPipelinesUntil))
+                if (!optional && (s_nativeMode || !settings::GetBool(settings::Id::AsyncShaders) || s_frame < s_waitPipelinesUntil))
                 {
                     job->forcedWait |= s_frame < s_waitPipelinesUntil;
                     job->cv.wait(lock, [&] { return job->done; });
@@ -7787,6 +7787,9 @@ void main()
         auto skip = [&](uint64_t key, const char* why) {
             s_stats.skipped++;
             LogOnce(key, "draw skipped: %s", why);
+            // A native game call must either record its work or report failure.
+            // Compatibility's missing-pipeline policy cannot silently drop it.
+            if (s_nativeDraw) throw std::runtime_error(std::string("native draw failed: ")+why);
         };
         if (!s_vs || !s_ps)
             return skip(1, "no shaders loaded");

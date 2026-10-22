@@ -29,6 +29,39 @@ static void Verify(const std::vector<uint8_t>& pixels) {
         assert(!memcmp(pixels.data()+(y*16+x)*4,expected,4));
     }
 }
+static std::vector<uint8_t> PresentedPixels() {
+    auto& c=video::testContext;
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};bi.size=1024;bi.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VkBuffer buffer;Check(vkCreateBuffer(c.device,&bi,nullptr,&buffer));
+    VkMemoryRequirements requirements;vkGetBufferMemoryRequirements(c.device,buffer,&requirements);
+    VkPhysicalDeviceMemoryProperties properties;vkGetPhysicalDeviceMemoryProperties(c.physical,&properties);
+    uint32_t type=0;while(type<properties.memoryTypeCount&&(!(requirements.memoryTypeBits&(1u<<type))||
+        !(properties.memoryTypes[type].propertyFlags&VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))) ++type;
+    assert(type<properties.memoryTypeCount);
+    VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};alloc.allocationSize=requirements.size;alloc.memoryTypeIndex=type;
+    VkDeviceMemory memory;Check(vkAllocateMemory(c.device,&alloc,nullptr,&memory));Check(vkBindBufferMemory(c.device,buffer,memory,0));
+    VkCommandPoolCreateInfo pi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pi.queueFamilyIndex=c.queueFamily;
+    VkCommandPool pool;Check(vkCreateCommandPool(c.device,&pi,nullptr,&pool));
+    VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};ca.commandPool=pool;ca.commandBufferCount=1;ca.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    VkCommandBuffer cmd;Check(vkAllocateCommandBuffers(c.device,&ca,&cmd));
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};Check(vkBeginCommandBuffer(cmd,&begin));
+    VkMemoryBarrier ready{VK_STRUCTURE_TYPE_MEMORY_BARRIER};ready.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT;ready.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&ready,0,nullptr,0,nullptr);
+    VkBufferImageCopy region{};region.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.imageExtent={16,16,1};
+    vkCmdCopyImageToBuffer(cmd,video::presented,VK_IMAGE_LAYOUT_GENERAL,buffer,1,&region);
+    VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};host.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;host.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&host,0,nullptr,0,nullptr);
+    Check(vkEndCommandBuffer(cmd));VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};VkFence fence;Check(vkCreateFence(c.device,&fi,nullptr,&fence));
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&cmd;
+    {std::lock_guard lock(*c.queueMutex);Check(vkQueueSubmit(c.queue,1,&submit,fence));}
+    Check(vkWaitForFences(c.device,1,&fence,VK_TRUE,UINT64_MAX));
+    void* mapped;Check(vkMapMemory(c.device,memory,0,VK_WHOLE_SIZE,0,&mapped));
+    VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};range.memory=memory;range.size=VK_WHOLE_SIZE;
+    Check(vkInvalidateMappedMemoryRanges(c.device,1,&range));
+    std::vector<uint8_t> bytes(static_cast<uint8_t*>(mapped),static_cast<uint8_t*>(mapped)+1024);
+    vkUnmapMemory(c.device,memory);vkDestroyFence(c.device,fence,nullptr);vkDestroyCommandPool(c.device,pool,nullptr);
+    vkDestroyBuffer(c.device,buffer,nullptr);vkFreeMemory(c.device,memory,nullptr);return bytes;
+}
 int main() {
     Check(volkInitialize());VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};app.apiVersion=VK_API_VERSION_1_2;
     const char* layer="VK_LAYER_KHRONOS_validation";const char* extension=VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
@@ -115,10 +148,20 @@ layout(location=0) out vec4 color;void main(){color=vec4(.25,.5,.75,1);})");
     }
     rejected=false;try {worker::Copy(a,a,0,0,0,0,1,1);} catch(const std::invalid_argument&) {rejected=true;}
     assert(rejected&&worker::Running());
+    auto invalid=draw;invalid.state.colors[0]=b;invalid.state.depth={};invalid.state.rb_modecontrol=4;
+    invalid.state.pixel=Resource(5,gpu::ShaderStage::Pixel,"#version 450\ninvalid shader source");
+    rejected=false;try {worker::Draw(invalid);} catch(const std::runtime_error&) {rejected=true;}
+    assert(rejected&&worker::Running());
+    // An explicit native fence publishes completion without any PM4 event.
+    auto fence=worker::Fence();assert(fence.wait_for(std::chrono::seconds(10))==std::future_status::ready);fence.get();
+    std::array<std::thread,8> callers;
+    for(auto& caller:callers) caller=std::thread([&]{assert(worker::Start());auto f=worker::Fence();f.get();});
+    for(auto& caller:callers) caller.join();
     worker::Clear(c,0,0,18,20,black,1,0);worker::Copy(a,c,0,0,1,2,16,16);
     assert(worker::Readback(c,1,2,16,16)==pixels);
     assert(worker::Present(a,16,16));worker::Flush();assert(video::presented);assert(worker::Frames()==1);
-    auto front=video::presented;worker::Destroy(a.handle);assert(video::presented==front);
+    assert(PresentedPixels()==pixels);
+    auto front=video::presented;worker::Destroy(a.handle);assert(video::presented==front);assert(PresentedPixels()==pixels);
     worker::Destroy(b.handle);worker::Destroy(c.handle);worker::Destroy(depth.handle);assert(worker::GetMemoryStats().targetCount==0);
     auto counters=gpu::plume_rhi::GetCounters();assert(counters.draws==5);assert(counters.dispatches==0);assert(errors==0);
     std::cout<<"Native owner: exact draw/sample/depth/copy output, presentation and retirement; zero validation errors\n"<<std::flush;

@@ -16,8 +16,8 @@ add_executable(native_runtime_test main.cpp stubs.cpp
 target_compile_definitions(native_runtime_test PRIVATE SB_PLUME_RHI=1 VK_NO_PROTOTYPES)
 target_compile_options(native_runtime_test PRIVATE -UNDEBUG -include ${CMAKE_CURRENT_SOURCE_DIR}/platform.h
     -ffunction-sections -fdata-sections -fno-strict-aliasing)
-target_include_directories(native_runtime_test PRIVATE ${ROOT}/runtime ${ROOT}/runtime/kernel
-    ${ROOT}/runtime/thirdparty/o1heap ${ROOT}/ppc ${ROOT}/tools/XenonRecomp/XenonUtils
+target_include_directories(native_runtime_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/fixture ${ROOT}/runtime ${ROOT}/runtime/kernel
+    ${ROOT}/runtime/thirdparty/o1heap ${ROOT}/tools/XenonRecomp/XenonUtils
     ${ROOT}/tools/XenonRecomp/thirdparty/simde ${ROOT}/tools/XenonRecomp/thirdparty/xxHash)
 target_link_options(native_runtime_test PRIVATE -Wl,--gc-sections)
 target_link_libraries(native_runtime_test PRIVATE plume glslang::glslang glslang::SPIRV
@@ -32,3 +32,8 @@ foreach(threads RANGE 0 1)
     set_tests_properties(native_runtime_${threads} PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE
         ENVIRONMENT "NFSMW_PIPELINE_THREADS=${threads};NFSMW_IMAGE_POOL=0;NFSMW_LOG_UNTILED_AREA=1")
 endforeach()
+add_executable(timeline_hook_test timeline_hook.cpp ${ROOT}/runtime/debug/timeline.cpp)
+get_target_property(NATIVE_INCLUDES native_runtime_test INCLUDE_DIRECTORIES)
+target_include_directories(timeline_hook_test PRIVATE ${NATIVE_INCLUDES})
+target_compile_options(timeline_hook_test PRIVATE -UNDEBUG)
+add_test(NAME game_present_hook COMMAND timeline_hook_test)

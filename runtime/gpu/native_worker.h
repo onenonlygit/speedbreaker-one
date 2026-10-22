@@ -2,6 +2,7 @@
 #pragma once
 #include "native_draw_state.h"
 #include "renderer.h"
+#include <future>
 namespace gpu::native_render::worker {
 // Process-lifetime owner; start after publishing the shared Vulkan context.
 bool Start();
@@ -16,6 +17,10 @@ void Destroy(Handle handle);
 std::vector<uint8_t> Readback(TargetDesc target,uint32_t x,uint32_t y,uint32_t width,uint32_t height,bool stencil=false);
 bool Present(TargetDesc source,uint32_t width,uint32_t height);
 void Flush();
+// GPU completion for all operations recorded before this call. Submission is
+// requested before return; waiting on the future never requires owner progress
+// from the waiting guest thread.
+std::shared_future<void> Fence();
 uint64_t Frames();
 renderer::MemoryStats GetMemoryStats();
 }

@@ -3,7 +3,7 @@ on:
   push:
     branches: ['android/plume-rhi']
   pull_request:
-    paths: ['cmake/**', 'patches/plume/**', 'runtime/gpu/plume_backend.*', 'runtime/gpu/game_shader.*', 'runtime/gpu/shader_translator.*', 'runtime/game/graphics_shaders.cpp', 'tests/game_shader_test.cpp', 'tests/plume/**', '.github/workflows/plume-rhi.yml']
+    paths: ['cmake/**', 'patches/plume/**', 'runtime/gpu/**', 'runtime/game/graphics_shaders.cpp', 'tests/game_shader_test.cpp', 'tests/plume/**', 'tests/native_runtime/**', '.github/workflows/plume-rhi.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -29,3 +29,30 @@ jobs:
         with:
           name: plume-offscreen-validation
           path: build/plume-test/Testing/Temporary/LastTest.log
+  native-runtime:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install native renderer host dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang-18 ninja-build libx11-dev mesa-vulkan-drivers vulkan-validationlayers
+      - name: Prepare public compiler headers and shader compiler
+        run: |
+          bash scripts/android/prepare_recompiler.sh --headers-only
+          git clone --depth 1 --branch 15.1.0 https://github.com/KhronosGroup/glslang.git tools/glslang-android
+      - name: Build full renderer with AddressSanitizer
+        run: |
+          cmake -S tests/native_runtime -B build/native-runtime -G Ninja -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 -DCMAKE_BUILD_TYPE=Debug -DSB_NATIVE_SANITIZE=ON
+          cmake --build build/native-runtime -j 4
+      - name: Validate native draws, resources and ordered submission
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          for icd in /usr/share/vulkan/icd.d/lvp_icd*.json; do
+            if [ -f "$icd" ]; then export VK_ICD_FILENAMES="$icd"; break; fi
+          done
+          ctest --test-dir build/native-runtime --output-on-failure
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-runtime-validation
+          path: build/native-runtime/Testing/Temporary/LastTest.log

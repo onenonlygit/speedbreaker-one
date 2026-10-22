@@ -98,6 +98,11 @@ bool Present(TargetDesc source,uint32_t width,uint32_t height) {
         if(shown) renderer::OnSwap(Get().frames.fetch_add(1,std::memory_order_relaxed)+1);return shown;});
 }
 void Flush() {Call([]{renderer::Flush();});}
+std::shared_future<void> Fence() {
+    auto signal=std::make_shared<std::promise<void>>();auto done=signal->get_future().share();
+    Call([signal]{renderer::QueueWrite([signal]{signal->set_value();});renderer::Submit();});
+    return done;
+}
 uint64_t Frames() {return Get().frames.load(std::memory_order_acquire);}
 renderer::MemoryStats GetMemoryStats() {return Call([]{return renderer::GetMemoryStats();});}
 }

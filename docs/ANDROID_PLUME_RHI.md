@@ -121,3 +121,17 @@ The next goal is a game-call-level renderer with no PM4/EDRAM emulation. 0.1.14
 adds real hardware vertex inputs for supported draws. It does not complete that
 conversion; existing command processing and EDRAM operations remain active.
 See ANDROID_NATIVE_RENDERER.md for implementation boundaries and required stages.
+
+## Native owner continuation — October 22
+
+The complete production native renderer now runs through its own ordered owner
+in the host fixture, without a PM4 processor or register array. Real Plume
+draws, sampled native images, translated hardware vertex input, depth/stencil,
+copies, readback, native GPU completion fences and presentation pixels pass
+core/synchronization validation plus AddressSanitizer on lavapipe. Native
+shader-cache/compilation defects found by that fixture are fixed. The fixture
+and CI job require only public dependencies. See ANDROID_NATIVE_RENDERER.md
+for exact evidence, CPU timing-hook correction and remaining game contracts.
+
+This remains a source implementation stage: native gameplay routing and its
+packaged Android APK are incomplete. The last packaged APK remains 0.1.15.
